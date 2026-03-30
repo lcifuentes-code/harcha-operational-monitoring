@@ -12,6 +12,7 @@ Los scripts de procesamiento (scripts/) no se modificaron.
 
 import streamlit as st
 import pandas as pd
+import numpy as np
 import io
 import sys
 from pathlib import Path
@@ -849,6 +850,13 @@ with tab_maq:
         tabla = tabla.merge(agg_rep,  on="ID_MAQUINA", how="left")
         tabla = tabla.merge(agg_comb, on="ID_MAQUINA", how="left")
 
+        # ── Forzar dtypes numéricos tras el merge (left join deja object en pandas 2+) ──
+        # Tras un left join, columnas con NaN se vuelven object si la fuente era int.
+        # Convertir explícitamente a float64 antes de cualquier operación aritmética.
+        for _col in ["horas_periodo", "dias_activos", "litros_periodo", "obras_distintas"]:
+            if _col in tabla.columns:
+                tabla[_col] = pd.to_numeric(tabla[_col], errors="coerce")
+
         # ── Calcular columnas derivadas ───────────────────────────────────────
         # Días sin reporte
         tabla["ultimo_reporte"] = pd.to_datetime(tabla["ultimo_reporte"], errors="coerce")
@@ -857,14 +865,14 @@ with tab_maq:
             lambda d: (ref_date - d).days if pd.notna(d) else None
         )
 
-        # Promedio horas/día
+        # Promedio horas/día  (np.nan mantiene float64; pd.NA lo convertiría a object)
         tabla["prom_hrs_dia"] = (
-            tabla["horas_periodo"] / tabla["dias_activos"].replace(0, pd.NA)
+            tabla["horas_periodo"] / tabla["dias_activos"].where(tabla["dias_activos"] != 0)
         ).round(2)
 
-        # Rendimiento (L/hr o N/A)
+        # Rendimiento L/hr
         tabla["rendimiento"] = (
-            tabla["litros_periodo"] / tabla["horas_periodo"].replace(0, pd.NA)
+            tabla["litros_periodo"] / tabla["horas_periodo"].where(tabla["horas_periodo"] != 0)
         ).round(2)
 
         # Promedio global de rendimiento para calcular umbral
