@@ -4,3 +4,4 @@
 pandas>=2.0.0          # Manipulación de datos
 openpyxl>=3.1.0        # Leer/escribir archivos Excel (.xlsx)
 python-dotenv>=1.0.0   # Cargar variables de entorno desde .env
+streamlit>=1.35.0      # Dashboard web interactivo
