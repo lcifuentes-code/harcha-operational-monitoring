@@ -1,0 +1,44 @@
+============================================================
+  RESUMEN OPERACIONAL DIARIO - HARCHA MAQUINARIA
+  Procesado: 2026-03-30 17:27:18
+============================================================
+
+📅 ÚLTIMO DÍA ACTIVO:
+   Fecha:              2026-03-29
+   Máquinas activas:   19
+   Operadores activos: 20
+   Total horas:        136.0 hrs
+   Total reportes:     20
+
+🚜 TOP 5 MÁQUINAS (por horas trabajadas en período):
+   • CT-38 VJGJ12                              1269.0 hrs
+   • CT-37 VJGJ10                              1104.0 hrs
+   • CT-14 RCKP70                              1095.0 hrs
+   • CT-15 RCKP71                               965.0 hrs
+   • EX-16 SJTT92                               857.0 hrs
+
+👷 TOP 5 OPERADORES (por horas):
+   1. Pedro Villacura Pino                       811.0 hrs
+   2. Sebastián Alfonso Bastías Rebolledo        724.0 hrs
+   3. Cristian Perez Pinuer                      707.0 hrs
+   4. Roberto Arias                              696.0 hrs
+   5. Cristian Vasquez Brevis                    644.0 hrs
+
+⛽ COMBUSTIBLE:
+   Total consumido en período: 1,867,850.0 litros
+   Máquinas con recargas:       156
+
+🚨 ALERTAS (323 detectadas):
+   [SIN_REPORTE] 015142dd → Nunca ha reportado
+   [SIN_REPORTE] 13ab1058 → Nunca ha reportado
+   [SIN_REPORTE] 1cb6f2ef → Nunca ha reportado
+   [SIN_REPORTE] 1f45f283 → Nunca ha reportado
+   [SIN_REPORTE] 28bcb178 → Nunca ha reportado
+   [SIN_REPORTE] 2c38a2be → Nunca ha reportado
+   [SIN_REPORTE] 4719c837 → Nunca ha reportado
+   [SIN_REPORTE] 4bb42302 → Nunca ha reportado
+   [SIN_REPORTE] 4e00a1cc → Nunca ha reportado
+   [SIN_REPORTE] 62938beb → Nunca ha reportado
+   ... y 313 alertas más (ver alertas.csv)
+
+============================================================

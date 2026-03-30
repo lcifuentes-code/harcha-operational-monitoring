@@ -1,0 +1,119 @@
+﻿posicion,USUARIO_TXT,total_horas,dias_trabajados,total_reportes,maquinas_distintas,promedio_horas_dia
+1,Pedro Villacura Pino,811,82,92,1,9.89
+2,Sebastián Alfonso Bastías Rebolledo,724,60,112,8,12.07
+3,Cristian Perez Pinuer,707,84,94,1,8.42
+4,Roberto Arias,696,82,83,2,8.49
+5,Cristian Vasquez Brevis,644,90,91,1,7.16
+6,Alejandro Martinez,641,75,76,2,8.55
+7,Gerardo Cheuque Llafquen,637,74,77,1,8.61
+8,Mauricio Marcelo Esparza mendez,634,93,103,4,6.82
+9,Pedro Mariqueo Huircaman,633,72,73,1,8.79
+10,Juan Castillo Mella,626,81,85,4,7.73
+11,Tomas Barrientos,611,75,77,1,8.15
+12,Julio Cesar Mendez,600,77,78,1,7.79
+13,Rodrigo Zapata,599,77,78,1,7.78
+14,Candido ivan bastias rebolledo,588,71,72,2,8.28
+15,Gerardo Navarrete Inostroza,583,97,98,1,6.01
+16,Carlos Sandoval González,578,75,81,2,7.71
+17,JOSE BELISARIO TROPAN ACHIBUR,578,59,60,1,9.8
+18,Luis Zapata Toledo,573,74,75,1,7.74
+19,Jose Flores,571,72,72,1,7.93
+20,Dario Ayala Rivera,560,68,78,1,8.24
+21,Ernesto Torres Fernandez,551,75,75,2,7.35
+22,Cristian Marcelo Gomez Jeldres,549,81,83,1,6.78
+23,Maria Ines Vallejos,546,64,105,18,8.53
+24,LUIS RODRIGO VASQUEZ MORA,542,70,70,2,7.74
+25,Marco Antonio Barrientos Peña,540,80,83,3,6.75
+26,Rene Martinez,533,81,87,2,6.58
+27,Julian Diocares,530,62,64,1,8.55
+28,Hector Pineda,527,60,79,2,8.78
+29,Juan Cossío,511,81,83,1,6.31
+30,Oscar Molina Pustela,511,65,65,1,7.86
+31,GERARDO HERIBERTO DIEZ,493,72,74,1,6.85
+32,Carlos Valenzuela,490,72,85,3,6.81
+33,Eduardo Subiabre,488,76,78,1,6.42
+34,Sebastian Garrido Vasquez,479,72,72,1,6.65
+35,Victor Esparza,478,72,79,6,6.64
+36,Rene Brevis Diaz,466,91,91,2,5.12
+37,Carlos Martinez,464,69,89,3,6.72
+38,Pedro Jaramillo,461,64,80,2,7.2
+39,CLAUDIO ENRIQUE SILVA VERA,457,68,70,1,6.72
+40,SERGIO ALEJANDRO BARRIENTOS GONZALEZ,455,64,72,6,7.11
+41,Geral Silva Arevalo,448,72,76,6,6.22
+42,Javier Esparza,446,73,76,5,6.11
+43,Nelson Saavedra,438,83,85,4,5.28
+44,Carlos Alfredo Alvarez Gonzalez,415,55,56,1,7.55
+45,Arturo David Donoso Catrilaf,407,85,87,1,4.79
+46,JUAN CARLOS CONTRERA CONTRER,399,58,60,3,6.88
+47,Ricardo Roa,394,63,63,2,6.25
+48,Jose Abel Castillo Gutierrez,383,62,67,6,6.18
+49,Carlos Lagos,376,56,63,1,6.71
+50,Rodrigo andres fernandez toloza,374,58,59,3,6.45
+51,Franco Jose Andres Velasquez Jara,373,83,145,6,4.49
+52,Guillermo Ignacio Orellana Gallardo,371,69,77,4,5.38
+53,Claudio Neftali Castillo Navarrete,360,67,70,3,5.37
+54,GUSTAVO ANDRES ZAPATA GALLARDO,353,48,50,3,7.35
+55,Luis Ruiz Ruiz,342,47,53,1,7.28
+56,Juan Andrés Fuenzalida Mendosa,341,36,47,3,9.47
+57,Jaime Perez Conejeros,331,60,70,5,5.52
+58,Jorge Gustin Zapata Orellana,330,59,63,9,5.59
+59,Rafael Fernández Amundaray,317,72,74,1,4.4
+60,Carlos Hernán Maldonado Villegas,316,47,47,1,6.72
+61,Ricardo Pineda,292,54,67,8,5.41
+62,Claudio Alejandro Beroiza Cossio,290,36,37,1,8.06
+63,Danilo Basualto,280,48,59,5,5.83
+64,José Alejandro Figueroa Guevara,280,51,59,4,5.49
+65,Pedro Farias cornejo,275,76,77,1,3.62
+66,RODRIGO ANDRES ALVAREZ MUÑOZ,262,40,41,1,6.55
+67,Rene Solis Huenutripay,254,73,79,4,3.48
+68,José Germán Rodriguez Curanahuel,249,38,40,5,6.55
+69,Oscar Iván Zamorano Araneda,230,30,33,2,7.67
+70,Manuel Gustavo Santibañez San juan,211,32,32,3,6.59
+71,Fidel Antonio Contreras Mardones,205,29,31,1,7.07
+72,Isaac Jaramillo Rios,204,49,51,3,4.16
+73,Jaime Rodrigo Mora Oñate,200,21,21,4,9.52
+74,Ramon Arteaga,193,28,28,1,6.89
+75,Ricardo Castillo,186,52,60,14,3.58
+76,Héctor Panicu,180,20,26,1,9.0
+77,Iván Genaro Jaramillo Amoyao,172,36,39,3,4.78
+78,Ricardo Andres Morales Sepulveda,147,67,67,1,2.19
+79,Ronald Miguel Angel Gutierrez Martinez,126,27,29,4,4.67
+80,Freddy lessen torres,126,33,33,1,3.82
+81,Hector Marcelo Aviles Montecinos,123,30,31,2,4.1
+82,Paola Andrea Elgueta Diocares,111,31,32,1,3.58
+83,Sergio Desifredo Contreras Amoyante,105,15,15,1,7.0
+84,manuel gustavo santibañez san juan,99,12,13,2,8.25
+85,Elias Medina,98,15,30,2,6.53
+86,Cristian Alejandro Ávila Hidalgo,94,17,19,2,5.53
+87,Ruperto Segundo Martinez Gallegos,92,33,34,2,2.79
+88,Jephte Hans Demosthenes,87,11,12,2,7.91
+89,Ramon Juan Avejares Yañez,74,29,29,4,2.55
+90,David Alejandro Pineda Monsalvez,71,10,10,1,7.1
+91,Andres Eduardo Balboa Balboa,69,10,10,1,6.9
+92,Patricio Dunstan,69,3,26,22,23.0
+93,Alberto Olivares,63,66,108,11,0.95
+94,Victor Ortiz,60,15,15,1,4.0
+95,Ariel Adolfo Amoyado Mendez,52,9,9,1,5.78
+96,Hernan Antonio Barria Alvarez,45,19,19,1,2.37
+97,Yerko Erwin Valle Bernal,42,6,6,1,7.0
+98,Alex adán Jaramillo esparza,40,7,7,1,5.71
+99,Aurelio Andres Martinez Castillo,37,5,5,1,7.4
+100,Erlic Patricio Herrera Arriagada,37,15,17,1,2.47
+101,Roberto Zapata Gallardo,12,1,1,1,12.0
+102,Felipe Soto,8,1,2,2,8.0
+103,Sergio Felipe Acuña Fernández,7,23,24,1,0.3
+104,Yerko Erwin valle Bernal,7,1,1,1,7.0
+105,Luis Antonio Cifuentes Chamorro,1,14,15,4,0.07
+106,Gerardo Javier Gacitua Quilaqueo,0,47,48,1,0.0
+107,Abel Enrique Riquelme Saez,0,57,57,1,0.0
+108,Alex Burgos alvarez,0,31,31,1,0.0
+109,Alex Alejandro Medina Inzunza,0,54,55,1,0.0
+110,Diego Ignacio Armstrong Barria,0,39,39,1,0.0
+111,Jaime Patricio San Martin Pineda,0,52,53,1,0.0
+112,Hector Bernachea,0,69,94,2,0.0
+113,Juan Carlos Leal Leal,0,79,79,1,0.0
+114,Julio Rivera,0,57,92,1,0.0
+115,Patricio Américo Coronado Coronado,0,43,44,1,0.0
+116,Marco Antonio Castillo Mora,0,67,67,2,0.0
+117,Ruben Espinoza Vasquez,0,2,2,1,0.0
+118,Stefania Alexandra Castillo Aravena,0,2,6,6,0.0
