@@ -42,12 +42,13 @@ def cargar_hoja(archivo: Path, nombre_hoja: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def cargar_datos(archivo: Path = None) -> dict:
+def cargar_datos(archivo=None) -> dict:
     """
     Carga todas las hojas necesarias del Excel.
 
     Parámetros:
-        archivo: ruta al .xlsx (opcional, usa la configuración por defecto)
+        archivo: ruta al .xlsx (Path), objeto BytesIO (Streamlit upload),
+                 o None para usar la configuración por defecto.
 
     Retorna:
         dict con claves: 'reportes', 'recargas', 'maquinas',
@@ -56,14 +57,15 @@ def cargar_datos(archivo: Path = None) -> dict:
     if archivo is None:
         archivo = INPUT_FILE_PATH
 
-    # Verificar que el archivo exista
-    if not archivo.exists():
+    # Solo verificar existencia si es una ruta en disco (no BytesIO de Streamlit)
+    nombre = getattr(archivo, "name", str(archivo))
+    if isinstance(archivo, Path) and not archivo.exists():
         raise FileNotFoundError(
             f"\n❌ No se encontró el archivo: {archivo}"
             f"\n   Descarga el Excel desde Google Sheets y colócalo en: {archivo.parent}"
         )
 
-    print(f"\n📂 Cargando datos desde: {archivo.name}")
+    print(f"\n📂 Cargando datos desde: {nombre}")
 
     datos = {
         "reportes":         cargar_hoja(archivo, SHEET_REPORTES),
