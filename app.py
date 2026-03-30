@@ -356,138 +356,194 @@ tab_act, tab_maq, tab_ops, tab_comb, tab_alertas = st.tabs([
 # ════════════════════════════════════════════════════════════
 with tab_act:
 
-    # ── Cálculos previos ──────────────────────────────────────────────────────
+    # ── Cálculos centrales ────────────────────────────────────────────────────
 
-    # Salud operacional (capped a 100%)
     df_maq_cat       = datos.get("maquinas", pd.DataFrame())
     total_produccion = len(df_maq_cat[df_maq_cat["ESTADO"].isin(ESTADOS_ACTIVOS)]) \
                        if not df_maq_cat.empty else max(n_maquinas, 1)
     salud_pct        = min(round((n_maquinas / total_produccion * 100)
                                  if total_produccion > 0 else 0, 1), 100.0)
 
+    # % cumplimiento de reporte (máquinas en producción que reportaron al menos 1 vez)
+    maquinas_en_prod = set(
+        df_maq_cat[df_maq_cat["ESTADO"].isin(ESTADOS_ACTIVOS)]["ID_MAQUINA"].dropna()
+    ) if not df_maq_cat.empty else set()
+    maquinas_reportaron = set(df_rep["ID_MAQUINA"].dropna()) if not df_rep.empty else set()
+    cumplimiento_pct = min(round(
+        len(maquinas_reportaron & maquinas_en_prod) / len(maquinas_en_prod) * 100
+        if maquinas_en_prod else 0, 1), 100.0)
+
+    # Semáforo
     if salud_pct >= 90:
-        salud_color = "#10B981"; salud_bg = "#ECFDF5"; salud_borde = "#6EE7B7"
-        salud_emoji = "🟢";     salud_label = "Operación saludable"
-        estado_gral = "VERDE";  estado_color = "#065F46"; estado_fondo = "#ECFDF5"
-        estado_borde = "#6EE7B7"
+        salud_color  = "#10B981"; salud_bg = "#ECFDF5"; salud_borde = "#6EE7B7"
+        salud_emoji  = "🟢";     salud_label = "Operación saludable"
+        estado_gral  = "VERDE";  estado_color = "#065F46"
+        estado_fondo = "#ECFDF5"; estado_borde_css = "#6EE7B7"
+        banner_critico = False
     elif salud_pct >= 70:
-        salud_color = "#F59E0B"; salud_bg = "#FFFBEB"; salud_borde = "#FCD34D"
-        salud_emoji = "🟡";     salud_label = "Atención requerida"
-        estado_gral = "AMARILLO"; estado_color = "#92400E"; estado_fondo = "#FFFBEB"
-        estado_borde = "#FCD34D"
+        salud_color  = "#F59E0B"; salud_bg = "#FFFBEB"; salud_borde = "#FCD34D"
+        salud_emoji  = "🟡";     salud_label = "Atención requerida"
+        estado_gral  = "AMARILLO"; estado_color = "#92400E"
+        estado_fondo = "#FFFBEB"; estado_borde_css = "#FCD34D"
+        banner_critico = False
     else:
-        salud_color = "#EF4444"; salud_bg = "#FEF2F2"; salud_borde = "#FCA5A5"
-        salud_emoji = "🔴";     salud_label = "Estado crítico"
-        estado_gral = "ROJO";   estado_color = "#B91C1C"; estado_fondo = "#FEF2F2"
-        estado_borde = "#FCA5A5"
+        salud_color  = "#EF4444"; salud_bg = "#FEF2F2"; salud_borde = "#FCA5A5"
+        salud_emoji  = "🔴";     salud_label = "Estado crítico"
+        estado_gral  = "ROJO";   estado_color = "#B91C1C"
+        estado_fondo = "#FEF2F2"; estado_borde_css = "#FCA5A5"
+        banner_critico = True
 
-    # Alertas separadas por categoría
-    sin_rep_df = alertas[alertas["tipo_alerta"] == "SIN_REPORTE"] \
-                 if not alertas.empty and "tipo_alerta" in alertas.columns \
-                 else pd.DataFrame()
-    bajo_rend_df = maq_df[
-        maq_df["promedio_horas_dia"].notna() & (maq_df["promedio_horas_dia"] < 4)
-    ] if not maq_df.empty else pd.DataFrame()
+    # Alertas por categoría — ordenadas por impacto (peor primero)
+    sin_rep_df = pd.DataFrame()
+    if not alertas.empty and "tipo_alerta" in alertas.columns:
+        sin_rep_df = alertas[alertas["tipo_alerta"] == "SIN_REPORTE"].copy()
+        if "horas_sin_reporte" in sin_rep_df.columns:
+            sin_rep_df = sin_rep_df.sort_values(
+                "horas_sin_reporte", ascending=False, na_position="first"
+            )
 
-    # Variación respecto al día anterior (desde act_df)
-    def delta_dia(col: str) -> tuple:
-        """Retorna (valor_hoy, variacion_abs, variacion_pct) comparando últimos 2 días."""
-        if act_df.empty or col not in act_df.columns:
-            return None, None, None
-        ordenado = act_df.sort_values("FECHA", ascending=False)
-        if len(ordenado) < 2:
-            return ordenado.iloc[0][col], None, None
-        hoy  = ordenado.iloc[0][col]
-        ayer = ordenado.iloc[1][col]
-        dif  = hoy - ayer
-        pct  = (dif / ayer * 100) if ayer != 0 else 0
-        return hoy, dif, pct
+    bajo_rend_df = pd.DataFrame()
+    if not maq_df.empty:
+        bajo_rend_df = maq_df[
+            maq_df["promedio_horas_dia"].notna() & (maq_df["promedio_horas_dia"] < 4)
+        ].sort_values("promedio_horas_dia", ascending=True).copy()   # peor rendimiento primero
 
-    _, d_maq, p_maq   = delta_dia("maquinas_activas")
-    _, d_hrs, p_hrs   = delta_dia("total_horas")
-    hoy_rep, d_rep, _ = delta_dia("total_reportes")
-
-    def fmt_delta(dif, pct, unidad=""):
-        """Formatea el delta para st.metric."""
-        if dif is None:
-            return None, None
-        signo = "+" if dif >= 0 else ""
-        return f"{signo}{dif:.0f}{unidad}", None   # None = color automático
-
-    # Lista de problemas detectados para el mensaje ejecutivo
-    problemas = []
-    if len(sin_rep_df) > 0:
-        problemas.append(f"🔴 {len(sin_rep_df)} máquina(s) sin reporte")
-    if len(bajo_rend_df) > 0:
-        problemas.append(f"🟡 {len(bajo_rend_df)} máquina(s) con bajo rendimiento (<4 hrs/día)")
     comb_inusuales = len(alertas[alertas["tipo_alerta"] == "COMBUSTIBLE_INUSUAL"]) \
                      if not alertas.empty and "tipo_alerta" in alertas.columns else 0
-    if comb_inusuales > 0:
-        problemas.append(f"🟡 {comb_inusuales} recarga(s) de combustible inusual")
 
-    # ── 1. MENSAJE DE ESTADO AUTOMÁTICO ───────────────────────────────────────
+    # Problemas detectados (para mensaje automático)
+    problemas = []
+    if len(sin_rep_df) > 0:
+        problemas.append(f"🔴 {len(sin_rep_df)} máquina(s) sin reporte activo")
+    if len(bajo_rend_df) > 0:
+        problemas.append(f"🟡 {len(bajo_rend_df)} máquina(s) con bajo rendimiento (<4 hrs/día)")
+    if comb_inusuales > 0:
+        problemas.append(f"🟡 {comb_inusuales} recarga(s) de combustible fuera de rango")
+
+    # Recomendación automática según estado
     if not problemas:
-        msg_body = "✅ Sin problemas detectados. Todas las máquinas operan con normalidad."
+        recomendacion = "✅ Sin acciones urgentes. Mantener monitoreo regular."
+        rec_color = "#065F46"
+    elif salud_pct >= 70:
+        maq_sin = len(sin_rep_df)
+        recomendacion = (
+            f"⚡ Contactar a los jefes de obra para verificar el estado de "
+            f"{maq_sin} máquina(s) sin reporte. Revisar conectividad de AppSheet."
+            if maq_sin > 0 else
+            "⚡ Revisar rendimiento de máquinas identificadas y evaluar reasignación de operadores."
+        )
+        rec_color = "#92400E"
     else:
-        msg_body = "<br>".join(problemas)
+        recomendacion = (
+            f"🚨 ACCIÓN INMEDIATA: {len(sin_rep_df)} máquinas sin reporte. "
+            "Activar protocolo de verificación de flota. Contactar supervisores en terreno."
+        )
+        rec_color = "#B91C1C"
+
+    # Variación respecto al día anterior con flechas
+    def delta_con_flecha(col: str) -> dict:
+        if act_df.empty or col not in act_df.columns or len(act_df) < 2:
+            return {"flecha": "", "texto": "—", "color": "#94A3B8"}
+        ordenado = act_df.sort_values("FECHA", ascending=False)
+        hoy  = float(ordenado.iloc[0][col])
+        ayer = float(ordenado.iloc[1][col])
+        dif  = hoy - ayer
+        pct  = (dif / ayer * 100) if ayer != 0 else 0
+        flecha = "↑" if dif > 0 else ("↓" if dif < 0 else "→")
+        color  = "#10B981" if dif > 0 else ("#EF4444" if dif < 0 else "#94A3B8")
+        return {
+            "flecha": flecha,
+            "texto": f"{flecha} {abs(dif):.0f} ({pct:+.1f}%)",
+            "color": color,
+        }
+
+    delta_maq  = delta_con_flecha("maquinas_activas")
+    delta_hrs  = delta_con_flecha("total_horas")
+
+    # ── BANNER CRÍTICO ────────────────────────────────────────────────────────
+    if banner_critico:
+        st.markdown("""
+        <div style="background:#7F1D1D; border-radius:10px; padding:12px 18px;
+                    margin-bottom:12px; display:flex; align-items:center; gap:12px">
+            <span style="font-size:22px">⛔</span>
+            <div>
+                <div style="font-size:13px; font-weight:800; color:#FEF2F2; letter-spacing:.04em">
+                    RIESGO OPERACIONAL ALTO
+                </div>
+                <div style="font-size:12px; color:#FECACA; margin-top:2px">
+                    La flota está por debajo del umbral mínimo de reporte.
+                    Se recomienda revisión inmediata de la operación.
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # ── MENSAJE DE ESTADO + RECOMENDACIÓN ────────────────────────────────────
+    msg_body = "<br>".join(problemas) if problemas \
+               else "✅ Sin problemas detectados. Flota operando con normalidad."
 
     st.markdown(f"""
-    <div style="background:{estado_fondo}; border:1.5px solid {estado_borde};
+    <div style="background:{estado_fondo}; border:1.5px solid {estado_borde_css};
                 border-left:5px solid {salud_color}; border-radius:10px;
                 padding:14px 18px; margin-bottom:14px">
-        <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap">
+        <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+                    margin-bottom:6px">
             <span style="font-size:13px; font-weight:800; color:{estado_color};
                          letter-spacing:.05em">
                 {salud_emoji} ESTADO OPERACIONAL: {estado_gral}
             </span>
-            <span style="font-size:12px; color:{estado_color}; opacity:.8">
+            <span style="font-size:11.5px; color:{estado_color}; opacity:.75">
                 · {fecha_ini.strftime('%d/%m/%Y')} → {fecha_fin.strftime('%d/%m/%Y')}
             </span>
         </div>
-        <div style="font-size:12.5px; color:{estado_color}; margin-top:7px;
-                    opacity:.85; line-height:1.8">
+        <div style="font-size:12.5px; color:{estado_color}; opacity:.85;
+                    line-height:1.8; margin-bottom:8px">
             {msg_body}
+        </div>
+        <div style="font-size:12px; color:{rec_color}; font-weight:600;
+                    border-top:1px solid {estado_borde_css}; padding-top:8px">
+            💡 Recomendación: {recomendacion}
         </div>
     </div>
     """, unsafe_allow_html=True)
 
-    # ── 2. HEADER AZUL ────────────────────────────────────────────────────────
+    # ── HEADER AZUL ──────────────────────────────────────────────────────────
     st.markdown(f"""
-    <div style="background: linear-gradient(135deg, #1E40AF 0%, #2563EB 65%, #3B82F6 100%);
-                border-radius: 14px; padding: 24px 28px 20px; margin-bottom: 18px;
-                position: relative; overflow: hidden;">
+    <div style="background:linear-gradient(135deg,#1E40AF 0%,#2563EB 60%,#3B82F6 100%);
+                border-radius:14px; padding:22px 28px 18px; margin-bottom:16px;
+                position:relative; overflow:hidden">
         <div style="position:absolute;top:-30px;right:-20px;width:180px;height:180px;
                     border-radius:50%;background:rgba(255,255,255,.06)"></div>
         <div style="position:absolute;bottom:-40px;right:140px;width:120px;height:120px;
                     border-radius:50%;background:rgba(255,255,255,.04)"></div>
-        <div style="display:flex; align-items:flex-start; justify-content:space-between;
-                    flex-wrap:wrap; gap:14px; position:relative; z-index:1">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;
+                    flex-wrap:wrap;gap:12px;position:relative;z-index:1">
             <div>
-                <div style="font-size:10.5px; font-weight:700; letter-spacing:.1em;
-                            text-transform:uppercase; color:rgba(255,255,255,.6); margin-bottom:5px">
+                <div style="font-size:10px;font-weight:700;letter-spacing:.1em;
+                            text-transform:uppercase;color:rgba(255,255,255,.55);margin-bottom:4px">
                     HARCHA MAQUINARIA · RESUMEN EJECUTIVO
                 </div>
-                <div style="font-size:24px; font-weight:800; color:#fff; line-height:1.1; margin-bottom:7px">
+                <div style="font-size:22px;font-weight:800;color:#fff;line-height:1.1;margin-bottom:6px">
                     Vista Ejecutiva de Operaciones
                 </div>
-                <div style="font-size:12.5px; color:rgba(255,255,255,.75)">
+                <div style="font-size:12px;color:rgba(255,255,255,.7)">
                     📅 {fecha_ini.strftime('%d %b %Y')} → {fecha_fin.strftime('%d %b %Y')}
                     &nbsp;·&nbsp; {n_dias} días &nbsp;·&nbsp; {len(df_rep):,} reportes
                 </div>
             </div>
-            <div style="background:rgba(255,255,255,.12); border:1px solid rgba(255,255,255,.22);
-                        border-radius:12px; padding:14px 20px; text-align:center; min-width:150px">
-                <div style="font-size:9.5px; font-weight:700; letter-spacing:.08em;
-                            text-transform:uppercase; color:rgba(255,255,255,.55); margin-bottom:4px">
+            <div style="background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.22);
+                        border-radius:12px;padding:14px 20px;text-align:center;min-width:148px">
+                <div style="font-size:9px;font-weight:700;letter-spacing:.08em;
+                            text-transform:uppercase;color:rgba(255,255,255,.5);margin-bottom:3px">
                     SALUD OPERACIONAL
                 </div>
-                <div style="font-size:34px; font-weight:800; color:#fff; line-height:1">
+                <div style="font-size:32px;font-weight:800;color:#fff;line-height:1">
                     {salud_pct:.0f}%
                 </div>
-                <div style="font-size:11px; color:rgba(255,255,255,.8); margin-top:4px">
+                <div style="font-size:11px;color:rgba(255,255,255,.8);margin-top:3px">
                     {salud_emoji} {salud_label}
                 </div>
-                <div style="font-size:10px; color:rgba(255,255,255,.5); margin-top:2px">
+                <div style="font-size:10px;color:rgba(255,255,255,.5);margin-top:2px">
                     {n_maquinas} de {total_produccion} reportando
                 </div>
             </div>
@@ -495,8 +551,10 @@ with tab_act:
     </div>
     """, unsafe_allow_html=True)
 
-    # ── 3. KPIs CON VARIACIÓN ─────────────────────────────────────────────────
+    # ── KPIs (5 + 1 nuevo: cumplimiento) ─────────────────────────────────────
     color_alerta = "kpi-alerta" if n_alertas > 0 else "kpi-verde"
+    cumpl_color  = "kpi-verde" if cumplimiento_pct >= 90 \
+                   else ("kpi-ambar" if cumplimiento_pct >= 70 else "kpi-alerta")
     kpis = "".join([
         kpi_card("⏱️", "Horas totales",    f"{total_horas:,.0f}",
                  f"prom. {total_horas/n_dias:,.0f} hrs/día" if n_dias else "—"),
@@ -506,34 +564,38 @@ with tab_act:
                  "reportaron actividad", "kpi-verde"),
         kpi_card("⛽", "Litros totales",   f"{total_litros:,.0f}",
                  f"prom. {total_litros/n_dias:,.0f} L/día" if n_dias else "—", "kpi-ambar"),
-        kpi_card("🚨", "Alertas activas",  str(n_alertas),
-                 f"{len(sin_rep_df)} críticas · {len(bajo_rend_df)} bajo rend.", color_alerta),
+        kpi_card("📋", "Cumplimiento",     f"{cumplimiento_pct:.0f}%",
+                 f"{len(maquinas_reportaron & maquinas_en_prod)} de {len(maquinas_en_prod)} máquinas",
+                 cumpl_color),
     ])
     st.markdown(f'<div class="kpi-grid">{kpis}</div>', unsafe_allow_html=True)
 
-    # Fila de deltas (variación vs día anterior)
-    cd1, cd2, cd3, cd4, cd5 = st.columns(5)
-    if d_maq is not None:
-        cd2.metric("vs. día anterior (máquinas)", "",
-                   delta=f"{'+' if d_maq>=0 else ''}{d_maq:.0f} ({p_maq:+.1f}%)",
-                   delta_color="normal")
-    if d_hrs is not None:
-        cd1.metric("vs. día anterior (horas)", "",
-                   delta=f"{'+' if d_hrs>=0 else ''}{d_hrs:.0f} hrs ({p_hrs:+.1f}%)",
-                   delta_color="normal")
+    # Deltas con flechas
+    cd1, cd2, _, _, _ = st.columns(5)
+    if delta_hrs["flecha"]:
+        cd1.markdown(
+            f"<div style='font-size:12px;color:{delta_hrs['color']};font-weight:600;"
+            f"margin-top:-10px;padding-left:4px'>{delta_hrs['texto']} hrs vs ayer</div>",
+            unsafe_allow_html=True,
+        )
+    if delta_maq["flecha"]:
+        cd2.markdown(
+            f"<div style='font-size:12px;color:{delta_maq['color']};font-weight:600;"
+            f"margin-top:-10px;padding-left:4px'>{delta_maq['texto']} máquinas vs ayer</div>",
+            unsafe_allow_html=True,
+        )
 
-    st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
-    # ── 4. ALERTAS + GRÁFICO ─────────────────────────────────────────────────
+    # ── ALERTAS + GRÁFICO ────────────────────────────────────────────────────
     col_izq, col_der = st.columns([2, 3])
 
-    # ── Columna izquierda: Alertas separadas ──────────────────────────────────
     with col_izq:
 
-        # 4a. Alertas críticas — sin reporte
+        # Bloque crítico
         n_crit = len(sin_rep_df)
         st.markdown(f"""
-        <div class="seccion" style="border-left:3px solid #EF4444; margin-bottom:14px">
+        <div class="seccion" style="border-left:3px solid #EF4444;margin-bottom:12px">
             <div class="seccion-titulo" style="color:#DC2626">
                 🚨 Críticas — Sin reporte
                 <span class="badge badge-rojo" style="margin-left:6px">{n_crit}</span>
@@ -542,13 +604,12 @@ with tab_act:
 
         if sin_rep_df.empty:
             st.markdown("""
-            <div style="text-align:center;padding:20px 0">
-                <div style="font-size:28px;margin-bottom:6px">✅</div>
-                <div style="font-size:13px;font-weight:600;color:#065F46">
+            <div style="text-align:center;padding:18px 0">
+                <div style="font-size:28px;margin-bottom:5px">✅</div>
+                <div style="font-size:12.5px;font-weight:600;color:#065F46">
                     Todas reportando
                 </div>
-            </div>
-            """, unsafe_allow_html=True)
+            </div>""", unsafe_allow_html=True)
         else:
             for _, a in sin_rep_df.head(8).iterrows():
                 maq  = a.get("MAQUINA", a.get("ID_MAQUINA", "?"))
@@ -556,7 +617,7 @@ with tab_act:
                 hrs  = a.get("horas_sin_reporte", None)
                 hrs_txt = f"{hrs:.0f} hs" if pd.notna(hrs) else "sin historial"
                 st.markdown(f"""
-                <div class="alerta-item alerta-rojo" style="padding:8px 11px">
+                <div class="alerta-item alerta-rojo" style="padding:7px 11px">
                     <div class="alerta-dot alerta-dot-r"></div>
                     <div style="flex:1;min-width:0">
                         <div class="alerta-maq" style="overflow:hidden;text-overflow:ellipsis;
@@ -569,7 +630,7 @@ with tab_act:
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # 4b. Atención — bajo rendimiento
+        # Bloque atención
         n_br = len(bajo_rend_df)
         st.markdown(f"""
         <div class="seccion" style="border-left:3px solid #F59E0B">
@@ -581,31 +642,31 @@ with tab_act:
 
         if bajo_rend_df.empty:
             st.markdown("""
-            <div style="text-align:center;padding:16px 0">
-                <div style="font-size:13px;font-weight:600;color:#065F46">✅ Sin casos detectados</div>
-            </div>
-            """, unsafe_allow_html=True)
+            <div style="text-align:center;padding:14px 0">
+                <div style="font-size:12.5px;font-weight:600;color:#065F46">
+                    ✅ Sin casos
+                </div>
+            </div>""", unsafe_allow_html=True)
         else:
             for _, row in bajo_rend_df.head(5).iterrows():
                 nombre = str(row.get("MAQUINA_TXT", row.get("ID_MAQUINA", "?")))[:30]
                 prom   = row["promedio_horas_dia"]
-                total  = row["total_horas"]
+                total_h = row["total_horas"]
                 st.markdown(f"""
-                <div class="alerta-item alerta-ambar" style="padding:8px 11px">
+                <div class="alerta-item alerta-ambar" style="padding:7px 11px">
                     <div class="alerta-dot alerta-dot-a"></div>
                     <div style="flex:1">
                         <div class="alerta-maq">{nombre}</div>
                         <div class="alerta-desc">
-                            {prom:.1f} hrs/día prom. · {total:.0f} hrs totales
+                            {prom:.1f} hrs/día · {total_h:.0f} hrs total
                         </div>
                     </div>
                 </div>""", unsafe_allow_html=True)
             if n_br > 5:
-                st.caption(f"… {n_br - 5} más en la pestaña Máquinas")
+                st.caption(f"… {n_br - 5} más en Máquinas")
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # ── Columna derecha: único gráfico con selector ───────────────────────────
     with col_der:
         st.markdown("""
         <div class="seccion">
@@ -613,7 +674,7 @@ with tab_act:
         """, unsafe_allow_html=True)
 
         metrica_sel = st.radio(
-            "Ver:",
+            "",
             ["🚜 Máquinas activas", "⏱ Horas trabajadas", "⛽ Combustible diario"],
             horizontal=True,
             label_visibility="collapsed",
@@ -625,43 +686,75 @@ with tab_act:
             act_plot = act_plot.sort_values("FECHA")
 
             if metrica_sel == "🚜 Máquinas activas":
-                col_g, color_g, label_g = "maquinas_activas", "#3B82F6", "Máquinas"
+                col_g, color_g = "maquinas_activas", "#3B82F6"
+                label_g = "Máquinas"
             elif metrica_sel == "⏱ Horas trabajadas":
-                col_g, color_g, label_g = "total_horas", "#10B981", "Horas"
+                col_g, color_g = "total_horas", "#10B981"
+                label_g = "Horas"
             else:
-                # Combustible diario — agrupar recargas por fecha si está disponible
-                if not datos.get("recargas", pd.DataFrame()).empty:
-                    rec = datos["recargas"].copy()
+                # Combustible diario real desde recargas
+                rec = datos.get("recargas", pd.DataFrame())
+                if not rec.empty:
+                    rec = rec.copy()
                     rec["FECHA_DIA"] = pd.to_datetime(rec["FECHA"]).dt.date
-                    comb_dia = (rec.groupby("FECHA_DIA")["LITROS"].sum()
-                                   .reset_index()
-                                   .rename(columns={"FECHA_DIA": "FECHA", "LITROS": "litros_dia"}))
+                    comb_dia = (
+                        rec.groupby("FECHA_DIA")["LITROS"].sum()
+                        .reset_index()
+                        .rename(columns={"FECHA_DIA": "FECHA", "LITROS": "litros_dia"})
+                    )
                     comb_dia["FECHA"] = pd.to_datetime(comb_dia["FECHA"])
-                    # Filtrar por período
-                    comb_dia = comb_dia[
+                    act_plot = comb_dia[
                         (comb_dia["FECHA"].dt.date >= fecha_ini) &
                         (comb_dia["FECHA"].dt.date <= fecha_fin)
                     ].sort_values("FECHA")
-                    act_plot = comb_dia
-                    col_g, color_g, label_g = "litros_dia", "#F59E0B", "Litros"
+                    col_g, color_g = "litros_dia", "#F59E0B"
+                    label_g = "Litros"
                 else:
                     col_g, color_g, label_g = "total_horas", "#10B981", "Horas"
 
-            if col_g in act_plot.columns:
-                st.bar_chart(
-                    act_plot.set_index("FECHA")[col_g],
-                    height=280, color=color_g, use_container_width=True,
-                )
-                # Mini estadísticas
+            if col_g in act_plot.columns and not act_plot.empty:
+                import plotly.graph_objects as go
+
                 vals = act_plot[col_g]
+                avg  = vals.mean()
+
+                fig = go.Figure()
+                fig.add_trace(go.Bar(
+                    x=act_plot["FECHA"],
+                    y=vals,
+                    name=label_g,
+                    marker_color=color_g,
+                    marker_line_width=0,
+                    opacity=0.85,
+                ))
+                fig.add_hline(
+                    y=avg,
+                    line_dash="dot",
+                    line_color="#64748B",
+                    line_width=1.5,
+                    annotation_text=f" Prom: {avg:.1f}",
+                    annotation_font_size=11,
+                    annotation_font_color="#64748B",
+                )
+                fig.update_layout(
+                    height=250,
+                    margin=dict(l=0, r=8, t=8, b=0),
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    showlegend=False,
+                    xaxis=dict(showgrid=False, tickfont=dict(size=10)),
+                    yaxis=dict(gridcolor="#F1F5F9", tickfont=dict(size=10)),
+                )
+                st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
                 cs1, cs2, cs3 = st.columns(3)
-                cs1.metric("Mínimo", f"{vals.min():,.0f}")
-                cs2.metric("Promedio", f"{vals.mean():,.1f}")
-                cs3.metric("Máximo", f"{vals.max():,.0f}")
+                cs1.metric("Mínimo",  f"{vals.min():,.0f}")
+                cs2.metric("Promedio",f"{avg:,.1f}")
+                cs3.metric("Máximo",  f"{vals.max():,.0f}")
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # ── 5. FILA INFERIOR: Top 5 máquinas + Top 5 operadores ──────────────────
+    # ── FILA INFERIOR ─────────────────────────────────────────────────────────
     st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
     cb1, cb2 = st.columns(2)
 
@@ -681,7 +774,7 @@ with tab_act:
     with cb2:
         st.markdown('<div class="seccion"><div class="seccion-titulo">👷 Top 5 operadores</div>', unsafe_allow_html=True)
         if not ops_df.empty:
-            max_o   = ops_df.head(5)["total_horas"].max()
+            max_o    = ops_df.head(5)["total_horas"].max()
             medallas = {1: "🥇", 2: "🥈", 3: "🥉"}
             barras_html = "".join(
                 barra(f"{medallas.get(int(row['posicion']),'')} {str(row['USUARIO_TXT'])[:24]}",
@@ -692,63 +785,287 @@ with tab_act:
             st.markdown(barras_html, unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
-# TAB 2 — MÁQUINAS
+
+# ════════════════════════════════════════════════════════════
+# TAB 2 — MÁQUINAS (vista enriquecida)
 # ════════════════════════════════════════════════════════════
 with tab_maq:
-    if maq_df.empty:
-        st.info("Sin datos de máquinas para el período seleccionado.")
-    else:
-        prom_dia = (total_horas / n_dias) if n_dias > 0 else 0
-        top_maq  = maq_df.iloc[0]["MAQUINA_TXT"] if not maq_df.empty else "—"
-        max_hrs  = maq_df["total_horas"].max()
 
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Máquinas activas",     n_maquinas)
-        c2.metric("Horas promedio/día",   f"{prom_dia:,.1f} hrs")
-        c3.metric("Máquina líder",        str(top_maq)[:24] if pd.notna(top_maq) else "—")
-        c4.metric("Máx. horas (período)", f"{max_hrs:,.0f} hrs")
+    # ── Construir tabla maestra de máquinas ───────────────────────────────────
+    @st.cache_data(show_spinner=False)
+    def construir_tabla_maquinas(
+        rep_bytes: bytes,   # hash para invalidar caché al cambiar datos
+        fecha_ini_str: str,
+        fecha_fin_str: str,
+    ) -> pd.DataFrame:
+        return pd.DataFrame()   # placeholder; la lógica está abajo (fuera del cache)
+
+    # Catálogo base
+    df_cat = datos.get("maquinas", pd.DataFrame()).copy()
+    df_reps = df_rep.copy()    # reportes ya filtrados por fecha
+    df_rec  = datos.get("recargas", pd.DataFrame()).copy()
+
+    if df_cat.empty:
+        st.info("Sin catálogo de máquinas disponible.")
+    else:
+        # ── Agrupación de reportes por máquina ───────────────────────────────
+        if not df_reps.empty:
+            df_reps["FECHA_DIA"] = df_reps["FECHAHORA_INICIO"].dt.date
+            agg_rep = df_reps.groupby("ID_MAQUINA").agg(
+                horas_periodo   = ("HORAS_TRABAJADAS", "sum"),
+                dias_activos    = ("FECHA_DIA", "nunique"),
+                ultimo_operador = ("USUARIO_TXT", "last"),
+                ultima_obra     = ("OBRA_TXT", "last"),
+                obras_distintas = ("OBRA_TXT", "nunique"),
+                ultimo_reporte  = ("FECHAHORA_INICIO", "max"),
+            ).reset_index()
+        else:
+            agg_rep = pd.DataFrame(columns=[
+                "ID_MAQUINA","horas_periodo","dias_activos",
+                "ultimo_operador","ultima_obra","obras_distintas",
+                "ultimo_reporte",
+            ])
+
+        # ── Agrupación de recargas por máquina (en período) ──────────────────
+        if not df_rec.empty:
+            df_rec["FECHA_REC"] = pd.to_datetime(df_rec["FECHA"]).dt.date
+            mask_rec = (
+                (df_rec["FECHA_REC"] >= fecha_ini) &
+                (df_rec["FECHA_REC"] <= fecha_fin)
+            )
+            agg_comb = (
+                df_rec[mask_rec]
+                .groupby("ID_MAQUINA")["LITROS"]
+                .sum()
+                .reset_index()
+                .rename(columns={"LITROS": "litros_periodo"})
+            )
+        else:
+            agg_comb = pd.DataFrame(columns=["ID_MAQUINA", "litros_periodo"])
+
+        # ── Merge al catálogo ─────────────────────────────────────────────────
+        tabla = df_cat[["ID_MAQUINA", "MAQUINA", "EQUIPO_FAMILIA",
+                         "TIPO_MAQUINA", "ESTADO"]].copy()
+        tabla = tabla.merge(agg_rep,  on="ID_MAQUINA", how="left")
+        tabla = tabla.merge(agg_comb, on="ID_MAQUINA", how="left")
+
+        # ── Calcular columnas derivadas ───────────────────────────────────────
+        # Días sin reporte
+        tabla["ultimo_reporte"] = pd.to_datetime(tabla["ultimo_reporte"], errors="coerce")
+        ref_date = pd.Timestamp(fecha_fin)
+        tabla["dias_sin_reporte"] = tabla["ultimo_reporte"].apply(
+            lambda d: (ref_date - d).days if pd.notna(d) else None
+        )
+
+        # Promedio horas/día
+        tabla["prom_hrs_dia"] = (
+            tabla["horas_periodo"] / tabla["dias_activos"].replace(0, pd.NA)
+        ).round(2)
+
+        # Rendimiento (L/hr o N/A)
+        tabla["rendimiento"] = (
+            tabla["litros_periodo"] / tabla["horas_periodo"].replace(0, pd.NA)
+        ).round(2)
+
+        # Promedio global de rendimiento para calcular umbral
+        prom_rend = tabla["rendimiento"].dropna().mean()
+
+        # Estado operacional
+        def clasificar_estado(row):
+            en_prod = str(row.get("ESTADO", "")).strip() in ESTADOS_ACTIVOS
+            reporto = pd.notna(row["horas_periodo"]) and row["horas_periodo"] > 0
+            if not en_prod:
+                return "Fuera de producción"
+            if not reporto:
+                return "Sin reporte"
+            prom_h = row.get("prom_hrs_dia", None)
+            if pd.notna(prom_h) and prom_h < 4:
+                return "Bajo rendimiento"
+            return "Activa"
+
+        tabla["estado_operacional"] = tabla.apply(clasificar_estado, axis=1)
+
+        # Alerta cambio de obra (si reportó en más de 1 obra en el período)
+        tabla["alerta_obra"] = tabla["obras_distintas"].apply(
+            lambda x: "⚠ Cambió de obra" if pd.notna(x) and x > 1 else ""
+        )
+
+        # ── Prioridad de ordenamiento por defecto ─────────────────────────────
+        orden_estado = {
+            "Sin reporte": 0, "Bajo rendimiento": 1,
+            "Activa": 2, "Fuera de producción": 3,
+        }
+        tabla["_orden"] = tabla["estado_operacional"].map(orden_estado).fillna(99)
+        tabla = tabla.sort_values(["_orden", "horas_periodo"],
+                                  ascending=[True, False]).drop(columns="_orden")
+
+        # ── KPIs rápidos ──────────────────────────────────────────────────────
+        n_activas    = (tabla["estado_operacional"] == "Activa").sum()
+        n_sin_rep    = (tabla["estado_operacional"] == "Sin reporte").sum()
+        n_bajo_rend  = (tabla["estado_operacional"] == "Bajo rendimiento").sum()
+        n_fuera      = (tabla["estado_operacional"] == "Fuera de producción").sum()
+        total_maq    = len(tabla)
+
+        k1, k2, k3, k4, k5 = st.columns(5)
+        k1.metric("Total catálogo",        total_maq)
+        k2.metric("✅ Activas",             n_activas,
+                  delta=f"{n_activas/total_maq*100:.0f}%", delta_color="off")
+        k3.metric("🚨 Sin reporte",         n_sin_rep,
+                  delta=f"-{n_sin_rep}" if n_sin_rep else None,
+                  delta_color="inverse")
+        k4.metric("⚠️ Bajo rendimiento",    n_bajo_rend,
+                  delta=f"-{n_bajo_rend}" if n_bajo_rend else None,
+                  delta_color="inverse")
+        k5.metric("🔘 Fuera de producción", n_fuera)
 
         st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
-        cg, cp = st.columns([3, 2])
 
-        with cg:
-            st.markdown('<div class="seccion"><div class="seccion-titulo">📊 Horas por máquina (top 20)</div>', unsafe_allow_html=True)
-            top20 = maq_df.head(20).copy()
-            top20["Nombre"] = top20["MAQUINA_TXT"].fillna(top20["ID_MAQUINA"]).str[:28]
-            st.bar_chart(top20.set_index("Nombre")["total_horas"],
-                         height=360, color="#3B82F6", horizontal=True, use_container_width=True)
-            st.markdown("</div>", unsafe_allow_html=True)
+        # ── Filtros y buscador ────────────────────────────────────────────────
+        st.markdown('<div class="seccion">', unsafe_allow_html=True)
+        st.markdown('<div class="seccion-titulo">🔍 Filtros</div>', unsafe_allow_html=True)
 
-        with cp:
-            st.markdown('<div class="seccion"><div class="seccion-titulo">🏭 Por tipo de equipo</div>', unsafe_allow_html=True)
-            tipo_grp = maq_df.groupby("MAQUINA_TIPO")["total_horas"].sum().sort_values(ascending=False)
-            max_t    = tipo_grp.max()
-            colores  = ["#3B82F6","#10B981","#F59E0B","#EF4444",
-                        "#8B5CF6","#06B6D4","#F97316","#84CC16"]
-            barras_html = ""
-            for i, (tipo, hrs) in enumerate(tipo_grp.items()):
-                barras_html += barra(
-                    str(tipo)[:22] if pd.notna(tipo) else "Sin tipo",
-                    hrs, max_t, colores[i % len(colores)], f"{hrs:,.0f} hrs"
-                )
-            st.markdown(barras_html, unsafe_allow_html=True)
-            st.markdown("</div>", unsafe_allow_html=True)
+        fcol1, fcol2, fcol3 = st.columns([2, 2, 3])
 
-        st.markdown('<div class="seccion"><div class="seccion-titulo">📋 Detalle completo</div>', unsafe_allow_html=True)
-        cols_v = [c for c in ["MAQUINA_TXT","MAQUINA_TIPO","total_horas",
-                               "dias_activos","promedio_horas_dia",
-                               "total_reportes","ultimo_reporte"] if c in maq_df.columns]
-        st.dataframe(maq_df[cols_v].rename(columns={
-            "MAQUINA_TXT":"Máquina","MAQUINA_TIPO":"Tipo",
-            "total_horas":"Horas","dias_activos":"Días activos",
-            "promedio_horas_dia":"Prom hrs/día",
-            "total_reportes":"Reportes","ultimo_reporte":"Último reporte",
-        }), use_container_width=True, hide_index=True, height=320)
-        st.download_button("⬇ Exportar CSV",
-            maq_df.to_csv(index=False).encode("utf-8-sig"),
-            "maquinas.csv", "text/csv")
+        with fcol1:
+            familias = ["Todas"] + sorted(
+                tabla["EQUIPO_FAMILIA"].dropna().unique().tolist()
+            )
+            familia_sel = st.selectbox("Familia de equipo", familias,
+                                        label_visibility="visible")
+
+        with fcol2:
+            estados_disp = ["Todos"] + sorted(
+                tabla["estado_operacional"].dropna().unique().tolist()
+            )
+            estado_sel = st.selectbox("Estado operacional", estados_disp,
+                                       label_visibility="visible")
+
+        with fcol3:
+            busqueda = st.text_input("🔎 Buscar por nombre o código",
+                                     placeholder="Ej: EX-14, KOMATSU, m000066...",
+                                     label_visibility="visible")
+
         st.markdown("</div>", unsafe_allow_html=True)
 
+        # ── Aplicar filtros ───────────────────────────────────────────────────
+        df_show = tabla.copy()
+
+        if familia_sel != "Todas":
+            df_show = df_show[df_show["EQUIPO_FAMILIA"] == familia_sel]
+        if estado_sel != "Todos":
+            df_show = df_show[df_show["estado_operacional"] == estado_sel]
+        if busqueda.strip():
+            mask_busq = df_show["MAQUINA"].astype(str).str.contains(
+                busqueda.strip(), case=False, na=False
+            ) | df_show["ID_MAQUINA"].astype(str).str.contains(
+                busqueda.strip(), case=False, na=False
+            )
+            df_show = df_show[mask_busq]
+
+        # ── Preparar tabla para mostrar ───────────────────────────────────────
+        def colorear_estado(val):
+            colores = {
+                "Activa":             "color:#065F46;font-weight:600",
+                "Sin reporte":        "color:#B91C1C;font-weight:600",
+                "Bajo rendimiento":   "color:#92400E;font-weight:600",
+                "Fuera de producción":"color:#475569;font-style:italic",
+            }
+            return colores.get(val, "")
+
+        cols_tabla = {
+            "MAQUINA":            "Máquina",
+            "EQUIPO_FAMILIA":     "Familia",
+            "estado_operacional": "Estado",
+            "ultimo_operador":    "Último operador",
+            "horas_periodo":      "Horas período",
+            "litros_periodo":     "Litros período",
+            "rendimiento":        "L/hr",
+            "ultima_obra":        "Última obra",
+            "alerta_obra":        "Cambio obra",
+            "dias_sin_reporte":   "Días sin reporte",
+        }
+
+        df_vista = df_show[[c for c in cols_tabla if c in df_show.columns]].copy()
+        df_vista = df_vista.rename(columns=cols_tabla)
+
+        # Formatear numéricos
+        for col_fmt, fmt_str in [
+            ("Horas período", "{:,.1f}"),
+            ("Litros período", "{:,.0f}"),
+            ("L/hr", "{:.2f}"),
+        ]:
+            if col_fmt in df_vista.columns:
+                df_vista[col_fmt] = df_vista[col_fmt].apply(
+                    lambda x: fmt_str.format(x) if pd.notna(x) else "—"
+                )
+
+        if "Días sin reporte" in df_vista.columns:
+            df_vista["Días sin reporte"] = df_vista["Días sin reporte"].apply(
+                lambda x: f"{int(x)} días" if pd.notna(x) else "Sin historial"
+            )
+
+        # ── Tabla con resaltado por estado ────────────────────────────────────
+        st.markdown('<div class="seccion">', unsafe_allow_html=True)
+        titulo_tabla = f"📋 Máquinas ({len(df_vista)} mostradas de {len(tabla)} total)"
+        st.markdown(f'<div class="seccion-titulo">{titulo_tabla}</div>',
+                    unsafe_allow_html=True)
+
+        if df_vista.empty:
+            st.info("Ninguna máquina coincide con los filtros aplicados.")
+        else:
+            # Streamlit no soporta estilos por fila en st.dataframe,
+            # usamos column_config para resaltar y st.dataframe con altura fija
+            st.dataframe(
+                df_vista,
+                use_container_width=True,
+                hide_index=True,
+                height=min(42 * len(df_vista) + 42, 520),
+                column_config={
+                    "Estado": st.column_config.TextColumn(
+                        "Estado", help="Estado operacional de la máquina"
+                    ),
+                    "Días sin reporte": st.column_config.TextColumn(
+                        "Días sin reporte", help="Días desde el último reporte en el período"
+                    ),
+                    "L/hr": st.column_config.TextColumn(
+                        "L/hr", help="Litros consumidos por hora trabajada"
+                    ),
+                    "Cambio obra": st.column_config.TextColumn(
+                        "Cambio obra", help="Alerta si la máquina reportó en más de una obra"
+                    ),
+                },
+            )
+
+            # ── Resumen de estados bajo la tabla ─────────────────────────────
+            st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+            rc1, rc2, rc3, rc4 = st.columns(4)
+            est_counts = df_vista["Estado"].value_counts() if "Estado" in df_vista.columns \
+                         else pd.Series(dtype=int)
+
+            def badge_estado(col, label, clase):
+                n = est_counts.get(label, 0)
+                col.markdown(
+                    f'<span class="badge badge-{clase}" style="font-size:12px;padding:4px 12px">'
+                    f'{label}: {n}</span>',
+                    unsafe_allow_html=True,
+                )
+
+            badge_estado(rc1, "Activa",            "verde")
+            badge_estado(rc2, "Sin reporte",        "rojo")
+            badge_estado(rc3, "Bajo rendimiento",   "ambar")
+            badge_estado(rc4, "Fuera de producción","azul")
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        # ── Exportar ─────────────────────────────────────────────────────────
+        csv_maq_export = df_show.drop(
+            columns=[c for c in ["obras_distintas"] if c in df_show.columns],
+            errors="ignore",
+        ).to_csv(index=False).encode("utf-8-sig")
+        st.download_button(
+            "⬇ Exportar tabla completa CSV",
+            csv_maq_export, "maquinas_detalle.csv", "text/csv",
+        )
 
 # ════════════════════════════════════════════════════════════
 # TAB 3 — OPERADORES
