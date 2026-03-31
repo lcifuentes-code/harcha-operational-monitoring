@@ -14,8 +14,15 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import io
+import re
 import sys
+import statistics
 from pathlib import Path
+from collections import Counter
+import plotly.graph_objects as go
+import streamlit.components.v1 as stc
+import openpyxl
+from openpyxl.styles import Font as _Font, PatternFill as _PFill, Alignment as _Align, Border as _Border, Side as _Side
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -210,6 +217,175 @@ def procesar(bytes_archivo: bytes, nombre: str) -> dict:
     metricas = calcular_metricas(datos)
     alertas  = generar_alertas(datos)
     return {"datos": datos, "metricas": metricas, "alertas": alertas}
+
+
+@st.cache_data(show_spinner=False)
+def _calc_hist_maquinas(archivo_bytes: bytes, fecha_fin_str: str) -> dict:
+    """
+    Pre-computa TODOS los datos históricos pesados de la pestaña Máquinas.
+
+    Cache key: (archivo_bytes, fecha_fin_str)
+      - Cambia archivo  → recalcula todo (cache miss esperado)
+      - Cambia fecha_fin → recalcula (ventana 10d y 30d dependen de ella)
+      - Clic en fila    → retorna cache hit instantáneo (~5 ms)
+
+    Retorna dict con:
+        hist_comb, ult_info, maq_10d, efic_map, mapa_obras,
+        hist_rep_ob, hist_rec_ob
+    """
+    # ── Cargar datos directamente desde bytes (sin depender de datos global) ──
+    _buf  = io.BytesIO(archivo_bytes)
+    _xl   = pd.ExcelFile(_buf)
+
+    _df_r = pd.read_excel(_xl, sheet_name="Query_Contratos_Reportes")
+    _df_c = pd.read_excel(_xl, sheet_name="Query_Recargas_Combustible")
+
+    # Tipos mínimos para operar
+    _df_r["FECHAHORA_INICIO"] = pd.to_datetime(_df_r["FECHAHORA_INICIO"], errors="coerce")
+    _df_r = _df_r.dropna(subset=["FECHAHORA_INICIO", "ID_MAQUINA"])
+    _df_r["HORAS_TRABAJADAS"] = pd.to_numeric(
+        _df_r.get("HORAS_TRABAJADAS", pd.Series(dtype=float)), errors="coerce"
+    ).fillna(0)
+
+    _df_c["_fecha"] = pd.to_datetime(_df_c.get("FECHA", pd.Series()), errors="coerce")
+    _df_c = _df_c.dropna(subset=["ID_MAQUINA"])
+
+    _ref       = pd.Timestamp(fecha_fin_str)
+    _corte_10d = _ref - pd.Timedelta(days=10)
+    _corte_30d = _ref - pd.Timedelta(days=30)
+
+    # ── 1. Mapa OBRAS (ID técnico → nombre legible) ───────────────────────────
+    try:
+        _df_ob = pd.read_excel(_xl, sheet_name="OBRAS").dropna(subset=["ID_OBRA","OBRA"])
+    except Exception:
+        _df_ob = pd.DataFrame(columns=["ID_OBRA","OBRA"])
+
+    def _es_id(x) -> bool:
+        if pd.isna(x): return False
+        s = str(x).strip()
+        return len(s) <= 10 and " " not in s and bool(re.match(r"^[a-zA-Z0-9]+$", s))
+
+    def _norm(t) -> str:
+        if pd.isna(t) or not str(t).strip(): return ""
+        return re.sub(r"\s+", " ", str(t).strip().upper())
+
+    mapa_obras = {
+        str(r["ID_OBRA"]).strip(): str(r["OBRA"]).strip()
+        for _, r in _df_ob.iterrows()
+        if _es_id(r["ID_OBRA"]) and pd.notna(r["OBRA"])
+    }
+
+    def _obra_rec(obra_id) -> str:
+        if pd.isna(obra_id): return ""
+        s = str(obra_id).strip()
+        if _es_id(s) and s in mapa_obras:
+            return _norm(mapa_obras[s])
+        return _norm(s)
+
+    # ── 2. Último operador / fecha / obra por máquina ─────────────────────────
+    ult_info: dict = {}
+    if not _df_r.empty:
+        ult_info = (
+            _df_r.sort_values("FECHAHORA_INICIO")
+            .groupby("ID_MAQUINA")
+            .agg(
+                _op=("USUARIO_TXT",     "last"),
+                _dt=("FECHAHORA_INICIO","max"),
+                _ob=("OBRA_TXT",        "last"),
+            )
+            .to_dict("index")
+        )
+
+    # ── 3. Máquinas activas últimos 10 días ───────────────────────────────────
+    maq_10d: set = set()
+    maq_10d |= set(
+        _df_r[_df_r["FECHAHORA_INICIO"] >= _corte_10d]["ID_MAQUINA"].dropna()
+    )
+    maq_10d |= set(
+        _df_c[_df_c["_fecha"] >= _corte_10d]["ID_MAQUINA"].dropna()
+    )
+
+    # ── 4. Historial de obras (separado por fuente, para _cambio_obra_v2) ─────
+    hist_rep_ob: dict = (
+        _df_r.sort_values("FECHAHORA_INICIO")
+        .groupby("ID_MAQUINA")["OBRA_TXT"]
+        .apply(lambda s: s.dropna().tolist())
+        .to_dict()
+    ) if not _df_r.empty else {}
+
+    hist_rec_ob: dict = (
+        _df_c.sort_values("_fecha")
+        .groupby("ID_MAQUINA")["OBRA_ID"]
+        .apply(lambda s: s.dropna().tolist())
+        .to_dict()
+    ) if not _df_c.empty else {}
+
+    # ── 5. Historial COMBINADO normalizado (para cambio de obra v2) ───────────
+    hist_comb: dict = {}
+
+    for _mid, _grp in _df_r.dropna(subset=["OBRA_TXT"]).groupby("ID_MAQUINA"):
+        hist_comb[_mid] = [
+            (r["FECHAHORA_INICIO"], _norm(r["OBRA_TXT"]), "REP")
+            for _, r in _grp[["FECHAHORA_INICIO","OBRA_TXT"]].iterrows()
+            if _norm(r["OBRA_TXT"])
+        ]
+
+    _df_c_v = _df_c.dropna(subset=["OBRA_ID","_fecha"])
+    for _mid, _grp in _df_c_v.groupby("ID_MAQUINA"):
+        _evs = hist_comb.get(_mid, [])
+        for _, _row in _grp[["_fecha","OBRA_ID"]].iterrows():
+            _ob = _obra_rec(_row["OBRA_ID"])
+            if _ob:
+                _evs.append((_row["_fecha"], _ob, "REC"))
+        hist_comb[_mid] = sorted(_evs, key=lambda x: x[0])
+
+    # ── 6. Eficiencia por máquina (últimos 30 días) ───────────────────────────
+    efic_map: dict = {}
+    _rep_30 = _df_r[_df_r["FECHAHORA_INICIO"] >= _corte_30d].copy()
+    if not _rep_30.empty:
+        _rep_30["_dia"] = _rep_30["FECHAHORA_INICIO"].dt.date
+        for _mid_e, _grp_e in _rep_30.groupby("ID_MAQUINA"):
+            _hrs = [
+                float(h)
+                for h in _grp_e.groupby("_dia")["HORAS_TRABAJADAS"].sum().values
+                if h > 0
+            ]
+            if not _hrs:
+                continue
+            _prom = round(sum(_hrs) / len(_hrs), 1)
+            _desv = round(statistics.stdev(_hrs), 1) if len(_hrs) > 1 else 0
+            _cv   = (_desv / _prom) if _prom > 0 else 0
+            _clf  = ("Óptimo" if _prom >= 8 else
+                     "Normal" if _prom >= 5 else
+                     "Bajo"   if _prom >= 2 else "Irregular")
+            _var  = ("Alta"  if _cv > 0.5 else
+                     "Media" if _cv > 0.25 else "Baja")
+            _concl = (
+                ("✔","Bien aprovechada") if _clf == "Óptimo" and _var in ("Baja","Media")
+                else ("⚠","Revisar uso") if _clf in ("Bajo","Irregular") or _cv > 0.5
+                else ("✔","Uso normal")
+            )
+            efic_map[_mid_e] = {
+                "prom":       _prom,
+                "desv":       _desv,
+                "variacion":  _var,
+                "clasif":     _clf,
+                "dias_datos": len(_hrs),
+                "concl":      _concl,
+            }
+
+    return {
+        "hist_comb":   hist_comb,
+        "ult_info":    ult_info,
+        "maq_10d":     maq_10d,
+        "efic_map":    efic_map,
+        "mapa_obras":  mapa_obras,
+        "hist_rep_ob": hist_rep_ob,
+        "hist_rec_ob": hist_rec_ob,
+        "norm_obra":   _norm,
+        "obra_rec":    _obra_rec,
+        "es_id":       _es_id,
+    }
 
 
 # ── Pantalla de carga ─────────────────────────────────────────────────────────
@@ -714,7 +890,7 @@ with tab_act:
                     col_g, color_g, label_g = "total_horas", "#10B981", "Horas"
 
             if col_g in act_plot.columns and not act_plot.empty:
-                import plotly.graph_objects as go
+
 
                 vals = act_plot[col_g]
                 avg  = vals.mean()
@@ -825,7 +1001,6 @@ with tab_act:
 # ════════════════════════════════════════════════════════════════════════════
 with tab_maq:
 
-    import re as _re_m
 
     # ────────────────────────────────────────────────────────────────────────
     # BLOQUE A — MAQUINAS_BASE
@@ -1106,147 +1281,33 @@ with tab_maq:
     _df_base["ID_MAQUINA"] = _df_base["CODIGO_LIMPIO"].map(_mapa_id)
 
     # ────────────────────────────────────────────────────────────────────────
-    # BLOQUE D — DATOS HISTÓRICOS (no dependen del período)
+    # BLOQUE D — DATOS HISTÓRICOS (cacheados)
+    # ────────────────────────────────────────────────────────────────────────
+    # Todos los cálculos pesados están en _calc_hist_maquinas().
+    # Cache key: (archivo_bytes, fecha_fin).
+    #   · Clic en fila   → cache HIT   → ~5 ms
+    #   · Cambio de fecha → cache MISS → recalcula (ventana 10d/30d cambia)
+    #   · Nuevo archivo  → cache MISS → recalcula todo
     # ────────────────────────────────────────────────────────────────────────
 
-    _df_rep_hist = datos["reportes"].copy()
-    _df_rec_hist = datos.get("recargas", pd.DataFrame()).copy()
-    _df_rep_prd  = df_rep.copy()   # ya filtrado por el selector de fechas
+    _df_rep_hist = datos["reportes"]       # referencia, no copia
+    _df_rec_hist = datos.get("recargas", pd.DataFrame())
+    _df_rep_prd  = df_rep.copy()           # filtrado por el selector de fechas
 
-    # D1. Máquinas activas en los últimos 10 días (desde fecha_fin)
-    _corte_10d = pd.Timestamp(fecha_fin) - pd.Timedelta(days=10)
-    _maq_10d   = set()
-    if not _df_rep_hist.empty:
-        _maq_10d |= set(
-            _df_rep_hist[_df_rep_hist["FECHAHORA_INICIO"] >= _corte_10d]
-            ["ID_MAQUINA"].dropna()
-        )
-    if not _df_rec_hist.empty:
-        _f_rec = pd.to_datetime(_df_rec_hist["FECHA"], errors="coerce")
-        _maq_10d |= set(
-            _df_rec_hist[_f_rec >= _corte_10d]["ID_MAQUINA"].dropna()
-        )
-
-    # D2. Último operador, fecha y obra por máquina
-    _ult: dict = {}
-    if not _df_rep_hist.empty:
-        _ult = (
-            _df_rep_hist.sort_values("FECHAHORA_INICIO")
-            .groupby("ID_MAQUINA")
-            .agg(
-                _op = ("USUARIO_TXT",     "last"),
-                _dt = ("FECHAHORA_INICIO","max"),
-                _ob = ("OBRA_TXT",        "last"),
-            )
-            .to_dict("index")
-        )
-
-    # D3. Historial de obras para alarma de cambio de obra
-    _hist_rep_ob: dict = {}
-    if not _df_rep_hist.empty:
-        _hist_rep_ob = (
-            _df_rep_hist.sort_values("FECHAHORA_INICIO")
-            .groupby("ID_MAQUINA")["OBRA_TXT"]
-            .apply(lambda s: s.dropna().tolist())
-            .to_dict()
-        )
-
-    _hist_rec_ob: dict = {}
-    if not _df_rec_hist.empty:
-        _rec_s = _df_rec_hist.copy()
-        _rec_s["_f"] = pd.to_datetime(_rec_s["FECHA"], errors="coerce")
-        _hist_rec_ob = (
-            _rec_s.sort_values("_f")
-            .groupby("ID_MAQUINA")["OBRA_ID"]
-            .apply(lambda s: s.dropna().tolist())
-            .to_dict()
-        )
-
-    # D3b. Historial COMBINADO (reportes + recargas) con timestamp y fuente.
-    # ─────────────────────────────────────────────────────────────────────
-    # NORMALIZACIÓN DE OBRAS (crítico para eliminar falsos positivos):
-    #
-    # El campo OBRA_ID de recargas contiene dos tipos de valores:
-    #   Tipo A: ID real corto (ej: "11375235", "db040f27") → mapear a nombre
-    #   Tipo B: texto directo (ej: "DV04 Choshuenco")       → usar tal cual
-    #
-    # Ambos se normalizan a upper().strip() + colapso de espacios dobles,
-    # de modo que "DV04 Choshuenco" == "DV04 CHOSHUENCO" en la comparación.
-    # ─────────────────────────────────────────────────────────────────────
-
-    import re as _re_obra
-
-    # Cargar mapa ID_OBRA → OBRA desde la hoja OBRAS del Excel
-    # session_state["archivo_bytes"] siempre contiene bytes → BytesIO directo
-    try:
-        _df_obras_raw = pd.read_excel(
-            io.BytesIO(st.session_state["archivo_bytes"]),
-            sheet_name="OBRAS"
-        )
-        _df_obras_raw = _df_obras_raw.dropna(subset=["ID_OBRA","OBRA"])
-    except Exception:
-        _df_obras_raw = pd.DataFrame(columns=["ID_OBRA","OBRA"])
-
-    def _es_id_valido(x) -> bool:
-        """True si x parece un ID técnico: sin espacios, ≤10 chars, alfanumérico."""
-        if pd.isna(x): return False
-        s = str(x).strip()
-        return (len(s) <= 10
-                and " " not in s
-                and bool(_re_obra.match(r"^[a-zA-Z0-9]+$", s)))
-
-    # Mapa ID → nombre para IDs válidos solamente
-    _mapa_obras = {
-        str(r["ID_OBRA"]).strip(): str(r["OBRA"]).strip()
-        for _, r in _df_obras_raw.iterrows()
-        if _es_id_valido(r["ID_OBRA"]) and pd.notna(r["OBRA"])
-    }
-
-    def _norm_obra(texto) -> str:
-        """Normaliza nombre de obra: UPPER, strip, colapso de espacios."""
-        if pd.isna(texto) or not str(texto).strip():
-            return ""
-        return _re_obra.sub(r"\s+", " ", str(texto).strip().upper())
-
-    def _obra_de_recarga(obra_id) -> str:
-        """
-        Convierte OBRA_ID de recarga a nombre normalizado.
-        Si es ID válido y está en mapa → usa el nombre real.
-        Si es texto directo → normaliza directamente.
-        """
-        if pd.isna(obra_id): return ""
-        s = str(obra_id).strip()
-        if _es_id_valido(s) and s in _mapa_obras:
-            return _norm_obra(_mapa_obras[s])
-        return _norm_obra(s)
-
-    # Construir hist_comb con nombres normalizados
-    _hist_comb: dict = {}
-
-    if not _df_rep_hist.empty:
-        for _mid, _grp in _df_rep_hist.dropna(
-            subset=["OBRA_TXT"]
-        ).groupby("ID_MAQUINA"):
-            _hist_comb[_mid] = [
-                (row["FECHAHORA_INICIO"],
-                 _norm_obra(row["OBRA_TXT"]),   # ← normalizado
-                 "REP")
-                for _, row in _grp[["FECHAHORA_INICIO","OBRA_TXT"]].iterrows()
-                if _norm_obra(row["OBRA_TXT"])
-            ]
-
-    if not _df_rec_hist.empty:
-        _rtmp = _df_rec_hist.copy()
-        _rtmp["_f"] = pd.to_datetime(_rtmp["FECHA"], errors="coerce")
-        for _mid, _grp in _rtmp.dropna(
-            subset=["OBRA_ID","_f"]
-        ).groupby("ID_MAQUINA"):
-            _evs = _hist_comb.get(_mid, [])
-            for _, _row in _grp[["_f","OBRA_ID"]].iterrows():
-                _ob = _obra_de_recarga(_row["OBRA_ID"])  # ← normalizado + mapeado
-                if _ob:
-                    _evs.append((_row["_f"], _ob, "REC"))
-            _hist_comb[_mid] = sorted(_evs, key=lambda x: x[0])
+    _h = _calc_hist_maquinas(
+        st.session_state["archivo_bytes"],
+        str(fecha_fin)
+    )
+    _hist_comb   = _h["hist_comb"]
+    _ult         = _h["ult_info"]
+    _maq_10d     = _h["maq_10d"]
+    _efic_map    = _h["efic_map"]
+    _mapa_obras  = _h["mapa_obras"]
+    _hist_rep_ob = _h["hist_rep_ob"]
+    _hist_rec_ob = _h["hist_rec_ob"]
+    _norm_obra   = _h["norm_obra"]
+    _obra_de_recarga = _h["obra_rec"]
+    _es_id_valido    = _h["es_id"]
 
     # ────────────────────────────────────────────────────────────────────────
     # BLOQUE E — DATOS DINÁMICOS (dependen del período seleccionado)
@@ -1381,10 +1442,9 @@ with tab_maq:
             return (True, f"Cambio detectado: {secuencia}")
 
         # CASO 2: obra actual ≠ obra más frecuente del historial completo
-        from collections import Counter as _Counter
         todas_obras   = [e[1] for e in eventos]
         obra_actual   = obras_ult[-1] if obras_ult else None
-        obra_habitual = _Counter(todas_obras).most_common(1)[0][0] \
+        obra_habitual = Counter(todas_obras).most_common(1)[0][0] \
                         if todas_obras else None
         if obra_actual and obra_habitual and obra_actual != obra_habitual:
             return (True,
@@ -1433,60 +1493,8 @@ with tab_maq:
     # Umbral configurable de inactividad (días)
     _UMBRAL_INACT = 7
 
-    # Pre-calcular eficiencia por máquina con historial completo de reportes
-    # (últimos 30 días desde fecha_fin para análisis de uso)
-    _corte_30d = _ref_ts - pd.Timedelta(days=30)
-    _efic_map: dict = {}
-
-    if not _df_rep_hist.empty:
-        _rep_30d = _df_rep_hist[
-            _df_rep_hist["FECHAHORA_INICIO"] >= _corte_30d
-        ].copy()
-        if not _rep_30d.empty:
-            _rep_30d["_dia"] = _rep_30d["FECHAHORA_INICIO"].dt.date
-            for _mid_e, _grp_e in _rep_30d.groupby("ID_MAQUINA"):
-                _hrs_por_dia = _grp_e.groupby("_dia")["HORAS_TRABAJADAS"].sum()
-                _hrs_list    = [h for h in _hrs_por_dia.values if h > 0]
-                if not _hrs_list:
-                    continue
-                import statistics as _stat
-                _prom   = round(sum(_hrs_list) / len(_hrs_list), 1)
-                _desv   = round(_stat.stdev([float(h) for h in _hrs_list]), 1) if len(_hrs_list) > 1 else 0
-                _cv     = (_desv / _prom) if _prom > 0 else 0   # coef. variación
-
-                # Clasificación
-                if _prom >= 8:
-                    _clf = "Óptimo"
-                elif _prom >= 5:
-                    _clf = "Normal"
-                elif _prom >= 2:
-                    _clf = "Bajo"
-                else:
-                    _clf = "Irregular"
-
-                if _cv > 0.5:
-                    _var = "Alta"
-                elif _cv > 0.25:
-                    _var = "Media"
-                else:
-                    _var = "Baja"
-
-                # Conclusión automática
-                if _clf == "Óptimo" and _var in ("Baja","Media"):
-                    _concl = ("✔", "Bien aprovechada")
-                elif _clf in ("Bajo","Irregular") or _cv > 0.5:
-                    _concl = ("⚠", "Revisar uso")
-                else:
-                    _concl = ("✔", "Uso normal")
-
-                _efic_map[_mid_e] = {
-                    "prom":       _prom,
-                    "desv":       _desv,
-                    "variacion":  _var,
-                    "clasif":     _clf,
-                    "dias_datos": len(_hrs_list),
-                    "concl":      _concl,
-                }
+    # Pre-calcular eficiencia por máquina — ya viene del cache _h["efic_map"]
+    # (Se calculó en _calc_hist_maquinas, no se repite aquí)
 
     def _generar_indicadores(row) -> tuple:
         """
@@ -1863,7 +1871,6 @@ with tab_maq:
         # st.components.v1.html() bypasea completamente el parser Markdown
         # y renderiza HTML puro directamente en un iframe aislado.
         # ─────────────────────────────────────────────────────────────────
-        import streamlit.components.v1 as _stc_maq
 
         # Altura dinámica según número de indicadores activos
         _n_ind_act = sum(1 for k in ["cambio_obra","inactividad","uso"]
@@ -1987,18 +1994,13 @@ with tab_maq:
         # Cerrar tarjeta
         _html_modal += "</div></div></div></body></html>"
 
-        _stc_maq.html(_html_modal, height=_modal_h, scrolling=True)
+        stc.html(_html_modal, height=_modal_h, scrolling=True)
 
 
     # ────────────────────────────────────────────────────────────────────────
     # BLOQUE L — EXPORTACIONES
     # ────────────────────────────────────────────────────────────────────────
 
-    import io as _io_exp
-    import openpyxl as _opxl
-    from openpyxl.styles import (Font as _Font, PatternFill as _PFill,
-                                  Alignment as _Align, Border as _Border,
-                                  Side as _Side)
 
     # ── Helper: escribir DataFrame en hoja con estilos profesionales ────────
     def _df_a_hoja(ws, df, subtitulo=None):
@@ -2074,7 +2076,7 @@ with tab_maq:
 
     with _col_exp2:
         # Excel con portada + datos
-        _wb_gen  = _opxl.Workbook()
+        _wb_gen  = openpyxl.Workbook()
         _ws_port = _wb_gen.active
         _ws_port.title = "Portada"
 
@@ -2096,7 +2098,7 @@ with tab_maq:
         _ws_dat = _wb_gen.create_sheet("Máquinas")
         _df_a_hoja(_ws_dat, _df_exp_base)
 
-        _buf_gen = _io_exp.BytesIO()
+        _buf_gen = io.BytesIO()
         _wb_gen.save(_buf_gen)
         _buf_gen.seek(0)
 
@@ -2157,7 +2159,7 @@ with tab_maq:
                     )
 
             # Construir Excel multi-hoja
-            _wb_maq = _opxl.Workbook()
+            _wb_maq = openpyxl.Workbook()
 
             # HOJA 1 — Resumen
             _ws1 = _wb_maq.active
@@ -2233,8 +2235,7 @@ with tab_maq:
             _ws4 = _wb_maq.create_sheet("Análisis obra")
             if not _df_seq.empty:
                 _df_a_hoja(_ws4, _df_seq, f"Secuencia de obras — {_codigo_sel}")
-                from collections import Counter as _Cnt
-                _conteo = _Cnt(_df_seq["Obra"].tolist()).most_common()
+                _conteo = Counter(_df_seq["Obra"].tolist()).most_common()
                 _ws4.append([])
                 _ws4.append(["RESUMEN"])
                 _ws4.cell(_ws4.max_row, 1).font = _Font(bold=True, color="1E40AF")
@@ -2244,7 +2245,7 @@ with tab_maq:
             else:
                 _ws4.append(["Sin historial de obras"])
 
-            _buf_maq = _io_exp.BytesIO()
+            _buf_maq = io.BytesIO()
             _wb_maq.save(_buf_maq)
             _buf_maq.seek(0)
 
