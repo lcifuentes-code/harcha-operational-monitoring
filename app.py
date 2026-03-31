@@ -790,16 +790,26 @@ with tab_act:
 
 
 
-# ════════════════════════════════════════════════════════════
-# TAB 2 — MÁQUINAS (orden por familia y código, todas visibles)
-# ════════════════════════════════════════════════════════════
+
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 2 — MÁQUINAS
+# ════════════════════════════════════════════════════════════════════════════
+# Lógica:
+#   BASE FIJA  → catálogo completo de datos["maquinas"] (nunca cambia por fechas)
+#   DINÁMICO   → horas, litros, operador, ubicación cambian con el período
+#   HISTORIAL  → estado, cambio-obra, días-sin-reporte usan TODO el historial
+# ════════════════════════════════════════════════════════════════════════════
 with tab_maq:
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # CONSTANTES
-    # ─────────────────────────────────────────────────────────────────────────
+    import re as _re_maq
 
-    IDS_DESCONTINUADOS = {
+    # ────────────────────────────────────────────────────────────────────────
+    # BLOQUE 1 — CONSTANTES
+    # ────────────────────────────────────────────────────────────────────────
+
+    # Máquinas marcadas como DESCONTINUADAS en el archivo de mantenciones.
+    # Se excluyen de la tabla definitivamente.
+    _IDS_DISC = {
         "m000101","m000103","m000107","m000108","m000110","m000111",
         "m000132","m000133","m000139","m000142","68ae0f2a",
         "1c3365b8","704594fd","ad9b215c","cd9197b4",
@@ -807,448 +817,594 @@ with tab_maq:
         "m000006","m000009","m000045","m000055","m000075","m000083",
     }
 
-    FAMILIAS_SIN_ALARMA = {
+    # Familias exentas de la alarma de cambio de obra.
+    # Las camionetas no hacen reportes operacionales, no aplica la lógica.
+    _FAMILIAS_SIN_ALARMA = {
         "CAMIONETA","SEMIREMOLQUE","REMOLQUE","CAMA BAJA","Batea",
         "ACCESORIOS","CUATRIMOTO","NO APLICA","ESTANQUE OBRA",
         "EQUIPO MOVIL","EXTERNO","EQUIPO INTEGRADO","TRILLADORA",
     }
 
-    # Orden de aparición: primero camionetas, luego camiones por tipo,
-    # luego maquinaria, generadores, semirremolques, otros.
-    # Basado en el orden de hojas del archivo de mantenciones Harcha.
-    ORDEN_PREFIJO = {
-        # ── Camionetas ──────────────────────────────────────
-        "C-":    (1,  "CAMIONETA"),
-        "MB-":   (2,  "CAMIONETA"),       # Mini Bus
-        "CUATRI":(3,  "CAMIONETA"),
-        # ── Camiones ────────────────────────────────────────
-        "CA-":   (10, "CAMIÓN ALJIBE"),
-        "CG-":   (11, "CAMIÓN GANADERO"),
-        "CK-":   (12, "CAMIÓN GANADERO"),
-        "CM-":   (13, "CAMIÓN MIXER"),
-        "CP-":   (14, "CAMIÓN PLANO / PLUMA"),
-        "CT-":   (15, "CAMIÓN TOLVA"),
-        "TC-":   (16, "TRACTO CAMIÓN"),
-        "CI-":   (17, "CAMIÓN IMPRIMADOR"),
-        "CS-":   (18, "CAMIÓN SLURRY"),
-        # ── Maquinaria pesada ────────────────────────────────
-        "CF-":   (20, "CARGADOR FRONTAL"),
-        "MC-":   (21, "MINICARGADOR"),
-        "EX-":   (22, "EXCAVADORA"),
-        "MX-":   (23, "MINI EXCAVADORA"),
-        "RX-":   (24, "RETROEXCAVADORA"),
-        "RXM-":  (25, "RETROEXCAVADORA"),
-        "BD-":   (26, "BULLDOZER"),
-        "T-":    (27, "TRACTOR"),
-        "MN-":   (28, "MOTONIVELADORA"),
-        # ── Otros equipos ────────────────────────────────────
-        "GM-":   (30, "GRÚA MÓVIL"),
-        "P-":    (31, "PLANTA / OTROS"),
-        "RC-":   (32, "RODILLO"),
-        "RL-":   (33, "RODILLO"),
-        "RN-":   (34, "RODILLO NEUMÁTICO"),
-        "GV-":   (35, "GRAVILLADORA"),
-        "BA-":   (36, "BARREDORA"),
-        "VH-":   (37, "VIBROHINCADOR"),
-        "EM-":   (38, "EQUIPO MENOR"),
-        "PF-":   (39, "PERFORADORA"),
-        "COM-":  (40, "COMPRESOR"),
-        "EF-":   (41, "EQUIPO INTEGRADO"),
-        # ── Generadores ──────────────────────────────────────
-        "G-":    (50, "GENERADOR"),
-        # ── Semirremolques / remolques ────────────────────────
-        "B-":    (60, "BATEA"),
-        "CB-":   (61, "CAMA BAJA"),
-        "R-":    (62, "REMOLQUE"),
-        # ── Externos y sin categoría ─────────────────────────
-        "EXT-":  (80, "EXTERNO"),
-        "TA-":   (81, "OTRO"),
-        "TR-":   (82, "OTRO"),
-        "ZZZ":   (99, "SIN CÓDIGO"),
+    # Orden de familias en la tabla (de menor a mayor número → aparece antes).
+    # Dentro de cada familia, las máquinas se ordenan por su número de código.
+    _ORDEN_FAM = {
+        # Grupo 1 — Camionetas
+        "C-":    (1,  "Camioneta"),
+        "MB-":   (2,  "Camioneta"),
+        "CUATRI":(3,  "Camioneta"),
+        # Grupo 2 — Camiones (por tipo)
+        "CA-":   (10, "Camión Aljibe"),
+        "CG-":   (11, "Camión Ganadero"),
+        "CK-":   (12, "Camión Ganadero"),
+        "CM-":   (13, "Camión Mixer"),
+        "CP-":   (14, "Camión Plano/Pluma"),
+        "CT-":   (15, "Camión Tolva"),
+        "TC-":   (16, "Tracto Camión"),
+        "CI-":   (17, "Camión Imprimador"),
+        "CS-":   (18, "Camión Slurry"),
+        # Grupo 3 — Maquinaria pesada
+        "CF-":   (20, "Cargador Frontal"),
+        "MC-":   (21, "Minicargador"),
+        "EX-":   (22, "Excavadora"),
+        "MX-":   (23, "Mini Excavadora"),
+        "RX-":   (24, "Retroexcavadora"),
+        "RXM-":  (25, "Retroexcavadora"),
+        "BD-":   (26, "Bulldozer"),
+        "T-":    (27, "Tractor"),
+        "MN-":   (28, "Motoniveladora"),
+        # Grupo 4 — Otros equipos
+        "GM-":   (30, "Grúa Móvil"),
+        "P-":    (31, "Planta/Otros"),
+        "RC-":   (32, "Rodillo"),
+        "RL-":   (33, "Rodillo"),
+        "RN-":   (34, "Rodillo Neumático"),
+        "GV-":   (35, "Gravilladora"),
+        "BA-":   (36, "Barredora"),
+        "VH-":   (37, "Vibrohincador"),
+        "EM-":   (38, "Equipo Menor"),
+        "PF-":   (39, "Perforadora"),
+        "COM-":  (40, "Compresor"),
+        "EF-":   (41, "Equipo Integrado"),
+        # Grupo 5 — Generadores
+        "G-":    (50, "Generador"),
+        # Grupo 6 — Semirremolques
+        "B-":    (60, "Batea"),
+        "CB-":   (61, "Cama Baja"),
+        "R-":    (62, "Remolque"),
+        # Resto
+        "EXT-":  (80, "Externo"),
+        "TA-":   (81, "Otro"),
+        "TR-":   (82, "Otro"),
+        "ZZZ":   (99, "Sin código"),
     }
 
-    import re as _re
+    # ────────────────────────────────────────────────────────────────────────
+    # BLOQUE 2 — FUNCIONES AUXILIARES
+    # ────────────────────────────────────────────────────────────────────────
 
-    def parse_codigo(s):
-        """Extrae (grupo_orden, etiqueta_grupo, número) del CODIGO_MAQUINA."""
-        if pd.isna(s) or not str(s).strip():
-            return 99, "SIN CÓDIGO", 9999
-        s = str(s).strip()
-        # Buscar prefijo más largo que coincida
-        for prefix, (orden, etiqueta) in sorted(
-            ORDEN_PREFIJO.items(), key=lambda x: -len(x[0])
+    def _parse_codigo(codigo: str) -> tuple:
+        """
+        Extrae (orden_familia, etiqueta_grupo, numero) de un CODIGO_MAQUINA.
+        Ejemplo: 'CT-14 RCKP70' → (15, 'Camión Tolva', 14)
+        Usado para ordenar la tabla de forma estable.
+        """
+        if pd.isna(codigo) or not str(codigo).strip():
+            return (99, "Sin código", 9999)
+        s = str(codigo).strip()
+        # Buscar el prefijo más largo que coincida (orden descendente de longitud)
+        for prefix, (orden, etq) in sorted(
+            _ORDEN_FAM.items(), key=lambda x: -len(x[0])
         ):
             if s.upper().startswith(prefix.upper()):
-                num_match = _re.search(r'(\d+)', s[len(prefix):])
-                num = int(num_match.group(1)) if num_match else 9999
-                return orden, etiqueta, num
-        # Sin prefijo reconocido: buscar número genérico
-        num_match = _re.search(r'(\d+)', s)
-        num = int(num_match.group(1)) if num_match else 9999
-        return 90, "OTRO", num
+                rest = s[len(prefix):]
+                m = _re_maq.search(r"(\d+)", rest)
+                num = int(m.group(1)) if m else 9999
+                return (orden, etq, num)
+        # Sin prefijo reconocido
+        m = _re_maq.search(r"(\d+)", s)
+        return (90, "Otro", int(m.group(1)) if m else 9999)
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # DATOS
-    # ─────────────────────────────────────────────────────────────────────────
-    df_cat_full = datos.get("maquinas", pd.DataFrame()).copy()
-    df_rep_all  = datos["reportes"].copy()
-    df_rec_all  = datos.get("recargas", pd.DataFrame()).copy()
-    df_rep_prd  = df_rep.copy()
+    def _codigo_corto(codigo: str) -> str:
+        """Extrae el código corto visible: 'CT-14 RCKP70' → 'CT-14'."""
+        if pd.isna(codigo):
+            return "—"
+        m = _re_maq.match(r"([A-Za-z\-]+\d+)", str(codigo).strip())
+        return m.group(1) if m else str(codigo).split()[0]
 
-    if df_cat_full.empty:
+    def _normalizar_obra(s) -> str | None:
+        """Normaliza texto de obra para comparación (minúsculas, sin espacios extra)."""
+        if pd.isna(s) or not str(s).strip():
+            return None
+        return str(s).lower().strip()
+
+    def _calcular_cambio_obra(mid: str, familia: str,
+                               hist_rep: dict, hist_rec: dict) -> tuple:
+        """
+        Determina si una máquina tiene una alarma de cambio de obra.
+        Retorna (icono, motivo_texto).
+
+        Reglas:
+          R1: Las últimas 2 obras de REPORTES son distintas.
+          R2: Las últimas 2 obras de RECARGAS son distintas.
+          R3: Última obra de reporte ≠ última obra de recarga.
+
+        Familias en _FAMILIAS_SIN_ALARMA quedan exentas.
+        """
+        if str(familia).strip() in _FAMILIAS_SIN_ALARMA:
+            return ("", "")
+
+        obras_rep = hist_rep.get(mid, [])   # lista ordenada por fecha asc
+        obras_rec = hist_rec.get(mid, [])
+
+        # R1: cambio consecutivo en reportes
+        if len(obras_rep) >= 2 and obras_rep[-1] != obras_rep[-2]:
+            return ("🔔",
+                    f"Reportes: '{str(obras_rep[-2])[:30]}'"
+                    f" → '{str(obras_rep[-1])[:30]}'")
+
+        # R2: cambio consecutivo en recargas
+        if len(obras_rec) >= 2 and obras_rec[-1] != obras_rec[-2]:
+            return ("🔔",
+                    f"Recargas: '{str(obras_rec[-2])[:30]}'"
+                    f" → '{str(obras_rec[-1])[:30]}'")
+
+        # R3: reporte vs recarga apuntan a obras distintas
+        ult_r = _normalizar_obra(obras_rep[-1]) if obras_rep else None
+        ult_c = _normalizar_obra(obras_rec[-1]) if obras_rec else None
+        if ult_r and ult_c and ult_r not in ult_c and ult_c not in ult_r:
+            return ("🔔",
+                    f"Reporte ('{str(obras_rep[-1])[:25]}')"
+                    f" ≠ recarga ('{str(obras_rec[-1])[:25]}')")
+
+        return ("", "")
+
+    # ────────────────────────────────────────────────────────────────────────
+    # BLOQUE 3 — CARGAR DATOS BASE (sin filtro de fechas)
+    # ────────────────────────────────────────────────────────────────────────
+
+    # Catálogo completo — base fija inamovible
+    _df_cat_raw  = datos.get("maquinas",  pd.DataFrame()).copy()
+    # Historial completo de reportes (para estado, operador, cambio obra)
+    _df_rep_hist = datos["reportes"].copy()
+    # Historial completo de recargas (para cambio obra y litros)
+    _df_rec_hist = datos.get("recargas",  pd.DataFrame()).copy()
+    # Reportes en el período seleccionado (para horas del período)
+    _df_rep_prd  = df_rep.copy()
+
+    if _df_cat_raw.empty:
         st.info("Sin catálogo de máquinas disponible.")
     else:
-        # Excluir descontinuadas
-        df_cat = df_cat_full[
-            ~df_cat_full["ID_MAQUINA"].isin(IDS_DESCONTINUADOS)
-        ].copy().reset_index(drop=True)
 
-        # ── Orden ─────────────────────────────────────────────────────────
-        parsed = df_cat["CODIGO_MAQUINA"].apply(parse_codigo)
-        df_cat["_ord"]    = parsed.apply(lambda x: x[0])
-        df_cat["_grupo"]  = parsed.apply(lambda x: x[1])
-        df_cat["_num"]    = parsed.apply(lambda x: x[2])
-        df_cat = df_cat.sort_values(
-            ["_ord", "_num"], ascending=[True, True]
+        # ──────────────────────────────────────────────────────────────────
+        # BLOQUE 4 — CONSTRUIR BASE FIJA
+        # Aplica exclusiones + orden permanente. NO depende de fechas.
+        # ──────────────────────────────────────────────────────────────────
+
+        # 4a. Excluir descontinuadas
+        _base = _df_cat_raw[
+            ~_df_cat_raw["ID_MAQUINA"].isin(_IDS_DISC)
+        ][["ID_MAQUINA","CODIGO_MAQUINA","MAQUINA","EQUIPO_FAMILIA",
+           "TIPO_MAQUINA","ESTADO"]].copy()
+
+        # 4b. Calcular campos de orden (una vez, permanente)
+        _parsed       = _base["CODIGO_MAQUINA"].apply(_parse_codigo)
+        _base["_ord"] = _parsed.apply(lambda x: x[0])
+        _base["_num"] = _parsed.apply(lambda x: x[2])
+        _base["_grp"] = _parsed.apply(lambda x: x[1])
+        _base["_cod"] = _base["CODIGO_MAQUINA"].apply(_codigo_corto)
+
+        # 4c. Ordenar: por grupo → por número dentro del grupo
+        _base = _base.sort_values(
+            ["_ord", "_num"], ascending=True
         ).reset_index(drop=True)
-        df_cat["#"] = range(1, len(df_cat) + 1)
+        _base["#"] = range(1, len(_base) + 1)
 
-        # ── A) Actividad últimos 10 días ───────────────────────────────────
-        corte_10d = pd.Timestamp(fecha_fin) - pd.Timedelta(days=10)
-        maq_10d = set()
-        if not df_rep_all.empty:
-            maq_10d |= set(
-                df_rep_all[df_rep_all["FECHAHORA_INICIO"] >= corte_10d]
+        # ──────────────────────────────────────────────────────────────────
+        # BLOQUE 5 — PRECALCULAR HISTORIAL COMPLETO
+        # Todo lo que NO depende del período seleccionado.
+        # ──────────────────────────────────────────────────────────────────
+
+        # 5a. Actividad últimos 10 días desde fecha_fin
+        _corte_10d = pd.Timestamp(fecha_fin) - pd.Timedelta(days=10)
+        _maq_10d   = set()
+        if not _df_rep_hist.empty:
+            _maq_10d |= set(
+                _df_rep_hist[_df_rep_hist["FECHAHORA_INICIO"] >= _corte_10d]
                 ["ID_MAQUINA"].dropna()
             )
-        if not df_rec_all.empty:
-            fechas_rec = pd.to_datetime(df_rec_all["FECHA"], errors="coerce")
-            maq_10d |= set(
-                df_rec_all[fechas_rec >= corte_10d]["ID_MAQUINA"].dropna()
+        if not _df_rec_hist.empty:
+            _fechas_rec = pd.to_datetime(_df_rec_hist["FECHA"], errors="coerce")
+            _maq_10d |= set(
+                _df_rec_hist[_fechas_rec >= _corte_10d]["ID_MAQUINA"].dropna()
             )
 
-        # ── B) Último operador y fecha ─────────────────────────────────────
-        ult_info = {}
-        if not df_rep_all.empty:
-            ult_info = (
-                df_rep_all.sort_values("FECHAHORA_INICIO")
+        # 5b. Último operador y fecha de último reporte (historial completo)
+        _ult_info: dict = {}
+        if not _df_rep_hist.empty:
+            _ult_info = (
+                _df_rep_hist.sort_values("FECHAHORA_INICIO")
                 .groupby("ID_MAQUINA")
-                .agg(ult_op=("USUARIO_TXT","last"),
-                     ult_dt=("FECHAHORA_INICIO","max"))
+                .agg(
+                    _ult_op = ("USUARIO_TXT",    "last"),
+                    _ult_dt = ("FECHAHORA_INICIO","max"),
+                    _ult_ob = ("OBRA_TXT",        "last"),
+                )
                 .to_dict("index")
             )
 
-        # ── C) Cambio de obra ─────────────────────────────────────────────
-        if not df_rep_all.empty:
-            rep_s = df_rep_all.sort_values("FECHAHORA_INICIO")
-            hist_rep = (
-                rep_s.groupby("ID_MAQUINA")["OBRA_TXT"]
-                .apply(lambda s: s.dropna().tolist()).to_dict()
+        # 5c. Historial de obras para alarma de cambio de obra
+        if not _df_rep_hist.empty:
+            _hist_rep_obras = (
+                _df_rep_hist.sort_values("FECHAHORA_INICIO")
+                .groupby("ID_MAQUINA")["OBRA_TXT"]
+                .apply(lambda s: s.dropna().tolist())
+                .to_dict()
             )
         else:
-            hist_rep = {}
+            _hist_rep_obras = {}
 
-        if not df_rec_all.empty:
-            rec_s = df_rec_all.copy()
-            rec_s["_f"] = pd.to_datetime(rec_s["FECHA"], errors="coerce")
-            rec_s = rec_s.sort_values("_f")
-            hist_rec = (
-                rec_s.groupby("ID_MAQUINA")["OBRA_ID"]
-                .apply(lambda s: s.dropna().tolist()).to_dict()
+        if not _df_rec_hist.empty:
+            _rec_s = _df_rec_hist.copy()
+            _rec_s["_f"] = pd.to_datetime(_rec_s["FECHA"], errors="coerce")
+            _hist_rec_obras = (
+                _rec_s.sort_values("_f")
+                .groupby("ID_MAQUINA")["OBRA_ID"]
+                .apply(lambda s: s.dropna().tolist())
+                .to_dict()
             )
         else:
-            hist_rec = {}
+            _hist_rec_obras = {}
 
-        def _n(s):
-            return str(s).lower().strip() if pd.notna(s) and str(s).strip() else None
+        # ──────────────────────────────────────────────────────────────────
+        # BLOQUE 6 — CALCULAR DATOS DINÁMICOS (dependen del período)
+        # ──────────────────────────────────────────────────────────────────
 
-        def cambio_obra_info(mid, familia):
-            if str(familia).strip() in FAMILIAS_SIN_ALARMA:
-                return "", ""
-            or_ = hist_rep.get(mid, [])
-            oc_ = hist_rec.get(mid, [])
-            if len(or_) >= 2 and or_[-1] != or_[-2]:
-                return "🔔", f"Reportes: '{str(or_[-2])[:28]}' → '{str(or_[-1])[:28]}'"
-            if len(oc_) >= 2 and oc_[-1] != oc_[-2]:
-                return "🔔", f"Recargas: '{str(oc_[-2])[:28]}' → '{str(oc_[-1])[:28]}'"
-            ult_r = _n(or_[-1]) if or_ else None
-            ult_c = _n(oc_[-1]) if oc_ else None
-            if ult_r and ult_c and ult_r not in ult_c and ult_c not in ult_r:
-                return "🔔", (
-                    f"Reporte ('{str(or_[-1])[:22]}') ≠ "
-                    f"recarga ('{str(oc_[-1])[:22]}')"
-                )
-            return "", ""
-
-        # ── D) Horas y litros del período ─────────────────────────────────
-        agg_h = pd.DataFrame(columns=["ID_MAQUINA","horas_periodo","prom_hrs_dia"])
-        if not df_rep_prd.empty:
-            tmp = df_rep_prd.copy()
-            tmp["_d"] = tmp["FECHAHORA_INICIO"].dt.date
-            agg_h = (
-                tmp.groupby("ID_MAQUINA")
+        # 6a. Horas trabajadas en el período
+        _agg_h = pd.DataFrame(columns=["ID_MAQUINA","horas_periodo","prom_hrs_dia"])
+        if not _df_rep_prd.empty:
+            _tmp = _df_rep_prd.copy()
+            _tmp["_dia"] = _tmp["FECHAHORA_INICIO"].dt.date
+            _agg_h = (
+                _tmp.groupby("ID_MAQUINA")
                 .agg(horas_periodo=("HORAS_TRABAJADAS","sum"),
-                     _dias=("_d","nunique"))
+                     _dias=("_dia","nunique"))
                 .reset_index()
             )
-            for _c in ["horas_periodo","_dias"]:
-                agg_h[_c] = pd.to_numeric(agg_h[_c], errors="coerce")
-            agg_h["prom_hrs_dia"] = (
-                agg_h["horas_periodo"]
-                / agg_h["_dias"].where(agg_h["_dias"] > 0)
+            _agg_h["horas_periodo"] = pd.to_numeric(
+                _agg_h["horas_periodo"], errors="coerce"
+            ).fillna(0)
+            _agg_h["_dias"] = pd.to_numeric(
+                _agg_h["_dias"], errors="coerce"
+            ).fillna(0)
+            _agg_h["prom_hrs_dia"] = (
+                _agg_h["horas_periodo"]
+                / _agg_h["_dias"].where(_agg_h["_dias"] > 0)
             ).round(1)
-            agg_h = agg_h[["ID_MAQUINA","horas_periodo","prom_hrs_dia"]]
+            _agg_h = _agg_h[["ID_MAQUINA","horas_periodo","prom_hrs_dia"]]
 
-        agg_l = pd.DataFrame(columns=["ID_MAQUINA","litros_periodo"])
-        if not df_rec_all.empty:
-            rec_p = df_rec_all.copy()
-            rec_p["_d"] = pd.to_datetime(rec_p["FECHA"], errors="coerce").dt.date
-            mask_p = (rec_p["_d"] >= fecha_ini) & (rec_p["_d"] <= fecha_fin)
-            agg_l = (
-                rec_p[mask_p].groupby("ID_MAQUINA")["LITROS"]
-                .sum().reset_index().rename(columns={"LITROS":"litros_periodo"})
+        # 6b. Litros consumidos en el período
+        _agg_l = pd.DataFrame(columns=["ID_MAQUINA","litros_periodo"])
+        if not _df_rec_hist.empty:
+            _rec_p = _df_rec_hist.copy()
+            _rec_p["_dia"] = pd.to_datetime(
+                _rec_p["FECHA"], errors="coerce"
+            ).dt.date
+            _mask_p = (
+                (_rec_p["_dia"] >= fecha_ini) &
+                (_rec_p["_dia"] <= fecha_fin)
             )
-            agg_l["litros_periodo"] = pd.to_numeric(
-                agg_l["litros_periodo"], errors="coerce"
+            _agg_l = (
+                _rec_p[_mask_p]
+                .groupby("ID_MAQUINA")["LITROS"]
+                .sum().reset_index()
+                .rename(columns={"LITROS":"litros_periodo"})
             )
+            _agg_l["litros_periodo"] = pd.to_numeric(
+                _agg_l["litros_periodo"], errors="coerce"
+            ).fillna(0)
 
-        # ── Ensamblar tabla ────────────────────────────────────────────────
-        tabla = df_cat[[
-            "#","ID_MAQUINA","CODIGO_MAQUINA","MAQUINA",
-            "EQUIPO_FAMILIA","TIPO_MAQUINA","ESTADO","_grupo"
-        ]].copy()
-        tabla = tabla.merge(agg_h, on="ID_MAQUINA", how="left")
-        tabla = tabla.merge(agg_l, on="ID_MAQUINA", how="left")
-        for _c in ["horas_periodo","prom_hrs_dia","litros_periodo"]:
-            tabla[_c] = pd.to_numeric(tabla[_c], errors="coerce")
+        # ──────────────────────────────────────────────────────────────────
+        # BLOQUE 7 — LEFT JOIN: base fija ← datos dinámicos
+        # La base NUNCA pierde máquinas (left join garantizado).
+        # ──────────────────────────────────────────────────────────────────
+        _tabla = _base.copy()
+        _tabla = _tabla.merge(_agg_h, on="ID_MAQUINA", how="left")
+        _tabla = _tabla.merge(_agg_l, on="ID_MAQUINA", how="left")
 
-        tabla["l_hr"] = (
-            tabla["litros_periodo"]
-            / tabla["horas_periodo"].where(tabla["horas_periodo"] > 0)
-        ).round(2)
+        # Forzar dtypes numéricos después del left join (evita object dtype)
+        for _col in ["horas_periodo","prom_hrs_dia","litros_periodo"]:
+            _tabla[_col] = pd.to_numeric(
+                _tabla[_col], errors="coerce"
+            ).fillna(0)
 
-        ref_ts = pd.Timestamp(fecha_fin)
+        # 7a. L/hr — rendimiento
+        _tabla["l_hr"] = (
+            _tabla["litros_periodo"]
+            / _tabla["horas_periodo"].where(_tabla["horas_periodo"] > 0)
+        ).round(2).fillna(0)
 
-        tabla["en_prod"]    = tabla["ESTADO"].apply(
+        # ──────────────────────────────────────────────────────────────────
+        # BLOQUE 8 — COLUMNAS DE HISTORIAL COMPLETO
+        # Estas columnas no cambian con el período; usan todo el historial.
+        # ──────────────────────────────────────────────────────────────────
+        _ref_ts = pd.Timestamp(fecha_fin)
+
+        # 8a. Estado operacional (últimos 10 días)
+        _tabla["en_prod"] = _tabla["ESTADO"].apply(
             lambda s: str(s).strip() in ESTADOS_ACTIVOS
         )
-        tabla["activa_10d"] = tabla["ID_MAQUINA"].isin(maq_10d)
+        _tabla["activa_10d"] = _tabla["ID_MAQUINA"].isin(_maq_10d)
 
-        def _estado_op(row):
+        def _calcular_estado(row) -> str:
             if not row["en_prod"]:    return "Fuera prod."
-            if not row["activa_10d"]: return "Sin reporte"
-            p = row["prom_hrs_dia"]
-            if pd.notna(p) and p < 4: return "Bajo rend."
+            if not row["activa_10d"]: return "Sin actividad"
+            if row["prom_hrs_dia"] > 0 and row["prom_hrs_dia"] < 4:
+                return "Bajo rend."
             return "Activa"
 
-        tabla["estado_op"] = tabla.apply(_estado_op, axis=1)
+        _tabla["estado_op"] = _tabla.apply(_calcular_estado, axis=1)
 
-        tabla["ult_op"] = tabla["ID_MAQUINA"].apply(
-            lambda m: str(ult_info.get(m,{}).get("ult_op","—"))[:30]
-        )
-        tabla["dias_sr"] = tabla["ID_MAQUINA"].apply(
-            lambda m: int((ref_ts - ult_info[m]["ult_dt"]).days)
-                      if m in ult_info and pd.notna(ult_info[m]["ult_dt"])
-                      else None
+        # 8b. Último operador (desde historial completo)
+        _tabla["ult_op"] = _tabla["ID_MAQUINA"].apply(
+            lambda m: str(_ult_info.get(m, {}).get("_ult_op", "—"))[:32]
+            if _ult_info.get(m, {}).get("_ult_op") else "—"
         )
 
-        cambio_res = tabla.apply(
-            lambda r: cambio_obra_info(r["ID_MAQUINA"], r["EQUIPO_FAMILIA"]),
+        # 8c. Ubicación: última obra del historial
+        _tabla["ubicacion"] = _tabla["ID_MAQUINA"].apply(
+            lambda m: str(_ult_info.get(m, {}).get("_ult_ob", "Sin datos"))[:35]
+            if _ult_info.get(m, {}).get("_ult_ob") else "Sin datos"
+        )
+
+        # 8d. Cambio de obra (con motivo para tooltip)
+        _cambio = _tabla.apply(
+            lambda r: _calcular_cambio_obra(
+                r["ID_MAQUINA"], r["EQUIPO_FAMILIA"],
+                _hist_rep_obras, _hist_rec_obras
+            ),
             axis=1,
         )
-        tabla["alarma"] = cambio_res.apply(lambda x: x[0])
-        tabla["motivo"] = cambio_res.apply(lambda x: x[1])
+        _tabla["alarma"]       = _cambio.apply(lambda x: x[0])
+        _tabla["motivo_alarm"] = _cambio.apply(lambda x: x[1])
 
-        # ── KPIs ──────────────────────────────────────────────────────────
-        n_tot   = len(tabla)
-        n_act   = (tabla["estado_op"] == "Activa").sum()
-        n_sr    = (tabla["estado_op"] == "Sin reporte").sum()
-        n_br    = (tabla["estado_op"] == "Bajo rend.").sum()
-        n_fp    = (tabla["estado_op"] == "Fuera prod.").sum()
-        n_alarm = (tabla["alarma"] == "🔔").sum()
+        # 8e. Días sin reporte
+        _tabla["dias_sr"] = _tabla["ID_MAQUINA"].apply(
+            lambda m: int(
+                (_ref_ts - _ult_info[m]["_ult_dt"]).days
+            ) if m in _ult_info and pd.notna(_ult_info[m]["_ult_dt"])
+            else None
+        )
 
-        # Badges KPI en estilo similar a la web de referencia
+        # ──────────────────────────────────────────────────────────────────
+        # BLOQUE 9 — MÉTRICAS RÁPIDAS (KPIs)
+        # ──────────────────────────────────────────────────────────────────
+        _n_tot   = len(_tabla)
+        _n_act   = (_tabla["estado_op"] == "Activa").sum()
+        _n_si    = (_tabla["estado_op"] == "Sin actividad").sum()
+        _n_br    = (_tabla["estado_op"] == "Bajo rend.").sum()
+        _n_fp    = (_tabla["estado_op"] == "Fuera prod.").sum()
+        _n_alarm = (_tabla["alarma"]    == "🔔").sum()
+
         st.markdown(f"""
         <div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap">
             <div style="background:#065F46;color:#fff;border-radius:8px;
-                        padding:10px 18px;text-align:center;min-width:90px">
-                <div style="font-size:22px;font-weight:800">{n_act}</div>
+                        padding:10px 20px;text-align:center;min-width:88px">
+                <div style="font-size:22px;font-weight:800">{_n_act}</div>
                 <div style="font-size:10px;opacity:.85;letter-spacing:.05em">ACTIVAS</div>
             </div>
             <div style="background:#B91C1C;color:#fff;border-radius:8px;
-                        padding:10px 18px;text-align:center;min-width:90px">
-                <div style="font-size:22px;font-weight:800">{n_sr}</div>
-                <div style="font-size:10px;opacity:.85;letter-spacing:.05em">SIN REPORTE</div>
+                        padding:10px 20px;text-align:center;min-width:88px">
+                <div style="font-size:22px;font-weight:800">{_n_si}</div>
+                <div style="font-size:10px;opacity:.85;letter-spacing:.05em">SIN ACTIVIDAD</div>
             </div>
             <div style="background:#92400E;color:#fff;border-radius:8px;
-                        padding:10px 18px;text-align:center;min-width:90px">
-                <div style="font-size:22px;font-weight:800">{n_br}</div>
+                        padding:10px 20px;text-align:center;min-width:88px">
+                <div style="font-size:22px;font-weight:800">{_n_br}</div>
                 <div style="font-size:10px;opacity:.85;letter-spacing:.05em">BAJO REND.</div>
             </div>
             <div style="background:#475569;color:#fff;border-radius:8px;
-                        padding:10px 18px;text-align:center;min-width:90px">
-                <div style="font-size:22px;font-weight:800">{n_fp}</div>
+                        padding:10px 20px;text-align:center;min-width:88px">
+                <div style="font-size:22px;font-weight:800">{_n_fp}</div>
                 <div style="font-size:10px;opacity:.85;letter-spacing:.05em">FUERA PROD.</div>
             </div>
             <div style="background:#1E40AF;color:#fff;border-radius:8px;
-                        padding:10px 18px;text-align:center;min-width:90px">
-                <div style="font-size:22px;font-weight:800">{n_tot}</div>
+                        padding:10px 20px;text-align:center;min-width:88px">
+                <div style="font-size:22px;font-weight:800">{_n_tot}</div>
                 <div style="font-size:10px;opacity:.85;letter-spacing:.05em">TOTAL FLOTA</div>
             </div>
-            <div style="background:#7C3AED;color:#fff;border-radius:8px;
-                        padding:10px 18px;text-align:center;min-width:90px">
-                <div style="font-size:22px;font-weight:800">{n_alarm}</div>
+            <div style="background:#6D28D9;color:#fff;border-radius:8px;
+                        padding:10px 20px;text-align:center;min-width:88px">
+                <div style="font-size:22px;font-weight:800">{_n_alarm}</div>
                 <div style="font-size:10px;opacity:.85;letter-spacing:.05em">🔔 CAMBIO OBRA</div>
             </div>
         </div>
         """, unsafe_allow_html=True)
 
-        # ── FILTROS ────────────────────────────────────────────────────────
+        # ──────────────────────────────────────────────────────────────────
+        # BLOQUE 10 — FILTROS
+        # Los filtros solo reducen lo que se ve, NUNCA cambian el orden base.
+        # ──────────────────────────────────────────────────────────────────
         st.markdown('<div class="seccion">', unsafe_allow_html=True)
-        fc1, fc2, fc3, fc4 = st.columns([2, 2, 1, 3])
+        _fc1, _fc2, _fc3, _fc4 = st.columns([2, 2, 1, 3])
 
-        with fc1:
-            # Grupos en el orden correcto (no alfabético)
-            grupos_ord = sorted(
-                tabla[["_grupo","EQUIPO_FAMILIA"]].drop_duplicates()
-                .set_index("EQUIPO_FAMILIA")["_grupo"].to_dict().items(),
-                key=lambda x: x[1]
+        with _fc1:
+            # Lista de grupos en el orden correcto (no alfabético)
+            _grupos_ord = (
+                _tabla[["_grp","_ord"]]
+                .drop_duplicates()
+                .sort_values("_ord")["_grp"]
+                .tolist()
             )
-            grupos_lista = ["Todas"] + [g[0] for g in grupos_ord
-                                         if g[0] in tabla["_grupo"].values]
-            # Dedup preservando order
-            seen = set()
-            grupos_uniq = ["Todas"]
-            for g in [x[0] for x in grupos_ord]:
-                if g not in seen and g in tabla["_grupo"].values:
-                    grupos_uniq.append(g); seen.add(g)
-            fam_sel = st.selectbox("Grupo / Familia", grupos_uniq)
+            _grupos_uniq = ["Todos"] + list(dict.fromkeys(_grupos_ord))
+            _fam_sel = st.selectbox("Grupo / Familia", _grupos_uniq,
+                                     key="maq_fam_sel")
 
-        with fc2:
-            est_lista = ["Todos"] + sorted(tabla["estado_op"].dropna().unique().tolist())
-            est_sel = st.selectbox("Estado", est_lista)
+        with _fc2:
+            _est_lista = ["Todos"] + sorted(
+                _tabla["estado_op"].dropna().unique().tolist()
+            )
+            _est_sel = st.selectbox("Estado", _est_lista,
+                                     key="maq_est_sel")
 
-        with fc3:
-            solo_alarm = st.checkbox("🔔 Alarmas")
+        with _fc3:
+            _solo_alarm = st.checkbox("🔔 Solo alarmas", key="maq_alarm_cb")
 
-        with fc4:
-            q = st.text_input("🔎 Buscar", placeholder="Código, marca, familia…")
+        with _fc4:
+            _q = st.text_input(
+                "🔎 Buscar",
+                placeholder="Código, marca, tipo, familia…",
+                key="maq_buscar"
+            )
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # ── Aplicar filtros ────────────────────────────────────────────────
-        df_f = tabla.copy()
-        if fam_sel  != "Todas": df_f = df_f[df_f["_grupo"]    == fam_sel]
-        if est_sel  != "Todos": df_f = df_f[df_f["estado_op"] == est_sel]
-        if solo_alarm:          df_f = df_f[df_f["alarma"]    == "🔔"]
-        if q.strip():
-            _q = q.strip().lower()
-            mask = (
-                df_f["CODIGO_MAQUINA"].astype(str).str.lower().str.contains(_q, na=False) |
-                df_f["MAQUINA"].astype(str).str.lower().str.contains(_q, na=False) |
-                df_f["EQUIPO_FAMILIA"].astype(str).str.lower().str.contains(_q, na=False) |
-                df_f["TIPO_MAQUINA"].astype(str).str.lower().str.contains(_q, na=False)
+        # ──────────────────────────────────────────────────────────────────
+        # BLOQUE 11 — APLICAR FILTROS
+        # Filtros sobre la copia, preservando orden original.
+        # ──────────────────────────────────────────────────────────────────
+        _df_f = _tabla.copy()
+
+        if _fam_sel   != "Todos":  _df_f = _df_f[_df_f["_grp"]      == _fam_sel]
+        if _est_sel   != "Todos":  _df_f = _df_f[_df_f["estado_op"] == _est_sel]
+        if _solo_alarm:            _df_f = _df_f[_df_f["alarma"]    == "🔔"]
+        if _q.strip():
+            _qn = _q.strip().lower()
+            _mask = (
+                _df_f["_cod"].str.lower().str.contains(_qn, na=False) |
+                _df_f["MAQUINA"].astype(str).str.lower().str.contains(_qn, na=False) |
+                _df_f["EQUIPO_FAMILIA"].astype(str).str.lower().str.contains(_qn, na=False) |
+                _df_f["TIPO_MAQUINA"].astype(str).str.lower().str.contains(_qn, na=False)
             )
-            df_f = df_f[mask]
+            _df_f = _df_f[_mask]
 
-        # ── Columna de estado con emoji ────────────────────────────────────
-        def _estado_emoji(s):
-            return {
-                "Activa":       "🟢 Activa",
-                "Sin reporte":  "🔴 Sin reporte",
-                "Bajo rend.":   "🟡 Bajo rend.",
-                "Fuera prod.":  "⚫ Fuera prod.",
-            }.get(s, s)
+        # ──────────────────────────────────────────────────────────────────
+        # BLOQUE 12 — PREPARAR VISTA FINAL
+        # ──────────────────────────────────────────────────────────────────
 
-        df_f = df_f.copy()
-        df_f["_estado_fmt"] = df_f["estado_op"].apply(_estado_emoji)
+        # Estado con emoji de color para lectura rápida
+        _estado_emoji = {
+            "Activa":        "🟢 Activa",
+            "Sin actividad": "🔴 Sin actividad",
+            "Bajo rend.":    "🟡 Bajo rend.",
+            "Fuera prod.":   "⚫ Fuera prod.",
+        }
+        _df_f = _df_f.copy()
+        _df_f["_est_fmt"] = _df_f["estado_op"].map(_estado_emoji).fillna(_df_f["estado_op"])
 
-        # ── Preparar vista ─────────────────────────────────────────────────
-        # Extraer el código corto (ej: "C-52") desde CODIGO_MAQUINA
-        def _codigo_corto(s):
-            if pd.isna(s): return "—"
-            m = _re.match(r'([A-Za-z\-]+\d+)', str(s).strip())
-            return m.group(1) if m else str(s).split()[0]
+        # Formateo de columnas numéricas (0 → "—")
+        def _fmt_num(x, decimales=1, suffix=""):
+            if pd.isna(x) or x == 0:
+                return "—"
+            fmt = f"{x:,.{decimales}f}"
+            return fmt + suffix
 
-        df_f["_cod"] = df_f["CODIGO_MAQUINA"].apply(_codigo_corto)
-
-        df_v = df_f[[
-            "#","_cod","TIPO_MAQUINA","_estado_fmt","ult_op",
+        _df_v = _df_f[[
+            "#","_cod","TIPO_MAQUINA","_est_fmt","ult_op",
             "horas_periodo","litros_periodo","l_hr",
-            "alarma","motivo","dias_sr",
-        ]].copy().rename(columns={
-            "#":           "#",
-            "_cod":        "Código",
-            "TIPO_MAQUINA":"Tipo",
-            "_estado_fmt": "Estado",
-            "ult_op":      "Último operador",
-            "horas_periodo":"Horas",
+            "ubicacion","alarma","motivo_alarm","dias_sr",
+        ]].copy()
+
+        _df_v["horas_periodo"]  = _df_v["horas_periodo"].apply(
+            lambda x: _fmt_num(x, 1)
+        )
+        _df_v["litros_periodo"] = _df_v["litros_periodo"].apply(
+            lambda x: _fmt_num(x, 0)
+        )
+        _df_v["l_hr"] = _df_v["l_hr"].apply(
+            lambda x: _fmt_num(x, 2) if not pd.isna(x) and x > 0 else "—"
+        )
+        _df_v["dias_sr"] = _df_v["dias_sr"].apply(
+            lambda x: f"{int(x)} d" if pd.notna(x) else "Sin hist."
+        )
+
+        _df_v = _df_v.rename(columns={
+            "#":             "#",
+            "_cod":          "Código",
+            "TIPO_MAQUINA":  "Tipo",
+            "_est_fmt":      "Estado",
+            "ult_op":        "Último operador",
+            "horas_periodo": "Horas",
             "litros_periodo":"Litros",
-            "l_hr":        "L/hr",
-            "alarma":      "🔔",
-            "motivo":      "Motivo alarma",
-            "dias_sr":     "Días s/rep.",
+            "l_hr":          "L/hr",
+            "ubicacion":     "Ubicación",
+            "alarma":        "🔔",
+            "motivo_alarm":  "Motivo alarma",
+            "dias_sr":       "Días s/rep.",
         })
 
-        df_v["Horas"]  = df_v["Horas"].apply(
-            lambda x: f"{x:,.1f}" if pd.notna(x) and x > 0 else "—"
-        )
-        df_v["Litros"] = df_v["Litros"].apply(
-            lambda x: f"{x:,.0f}" if pd.notna(x) and x > 0 else "—"
-        )
-        df_v["L/hr"]   = df_v["L/hr"].apply(
-            lambda x: f"{x:.2f}" if pd.notna(x) else "—"
-        )
-        df_v["Días s/rep."] = df_v["Días s/rep."].apply(
-            lambda x: f"{int(x)}d" if pd.notna(x) else "—"
-        )
-
-        # ── Tabla ──────────────────────────────────────────────────────────
+        # ──────────────────────────────────────────────────────────────────
+        # BLOQUE 13 — TABLA
+        # ──────────────────────────────────────────────────────────────────
         st.markdown(
             f'<div class="seccion">'
             f'<div class="seccion-titulo">'
-            f'Mostrando {len(df_v)} de {n_tot} máquinas'
+            f'Mostrando <b>{len(_df_v)}</b> de {_n_tot} máquinas'
             f'<span style="font-size:11px;color:var(--texto-3);'
             f'font-weight:400;margin-left:10px">'
-            f'Horas/Litros: {fecha_ini.strftime("%d/%m/%Y")} → '
-            f'{fecha_fin.strftime("%d/%m/%Y")}'
-            f' · Estado/Alarmas: historial completo'
+            f'Horas / Litros: {fecha_ini.strftime("%d/%m/%Y")}'
+            f' → {fecha_fin.strftime("%d/%m/%Y")}'
+            f' &nbsp;·&nbsp; Estado / Alarmas: historial completo'
             f'</span></div>',
             unsafe_allow_html=True,
         )
 
         st.dataframe(
-            df_v,
+            _df_v,
             use_container_width=True,
             hide_index=True,
-            height=min(40 * len(df_v) + 42, 620),
+            # Altura adaptativa: 40px/fila + header, máx 620px
+            height=min(40 * len(_df_v) + 42, 620),
             column_config={
-                "#": st.column_config.NumberColumn("#", width="small"),
+                "#": st.column_config.NumberColumn(
+                    "#", width="small", format="%d"
+                ),
                 "Código": st.column_config.TextColumn(
                     "Código", width="small"
                 ),
-                "Tipo": st.column_config.TextColumn("Tipo / Familia"),
+                "Tipo": st.column_config.TextColumn(
+                    "Tipo"
+                ),
                 "Estado": st.column_config.TextColumn(
                     "Estado",
                     help=(
-                        "🟢 Activa = acción en últimos 10 días\n"
-                        "🔴 Sin reporte = sin actividad 10 días\n"
-                        "🟡 Bajo rend. = < 4 hrs/día promedio\n"
-                        "⚫ Fuera prod. = estado en catálogo"
+                        "🟢 Activa        — alguna acción en los últimos 10 días\n"
+                        "🔴 Sin actividad — sin reportes ni recargas en 10 días\n"
+                        "🟡 Bajo rend.    — < 4 hrs/día promedio en el período\n"
+                        "⚫ Fuera prod.   — estado 'fuera de producción' en catálogo"
                     ),
                 ),
-                "Último operador": st.column_config.TextColumn("Último operador"),
-                "Horas":  st.column_config.TextColumn("Horas", width="small"),
-                "Litros": st.column_config.TextColumn("Litros", width="small"),
-                "L/hr":   st.column_config.TextColumn("L/hr",   width="small"),
+                "Último operador": st.column_config.TextColumn(
+                    "Último operador",
+                    help="Operador del último reporte en todo el historial",
+                ),
+                "Horas": st.column_config.TextColumn(
+                    "Horas",
+                    width="small",
+                    help="Horas trabajadas en el período seleccionado",
+                ),
+                "Litros": st.column_config.TextColumn(
+                    "Litros",
+                    width="small",
+                    help="Litros de combustible en el período seleccionado",
+                ),
+                "L/hr": st.column_config.TextColumn(
+                    "L/hr",
+                    width="small",
+                    help="Litros por hora trabajada en el período (rendimiento)",
+                ),
+                "Ubicación": st.column_config.TextColumn(
+                    "Ubicación",
+                    help="Última obra reportada en el historial completo",
+                ),
                 "🔔": st.column_config.TextColumn(
-                    "🔔", width="small",
-                    help="🔔 cambio de obra detectado — ver columna 'Motivo alarma'"
+                    "🔔",
+                    width="small",
+                    help="🔔 = cambio de obra detectado — ver columna 'Motivo alarma'",
                 ),
                 "Motivo alarma": st.column_config.TextColumn(
                     "Motivo alarma",
                     help=(
-                        "Razón de la alarma:\n"
+                        "Razón del 🔔:\n"
                         "• Últimas 2 obras de reportes distintas\n"
                         "• Últimas 2 obras de recargas distintas\n"
                         "• Obra último reporte ≠ obra última recarga\n"
@@ -1258,26 +1414,41 @@ with tab_maq:
                 "Días s/rep.": st.column_config.TextColumn(
                     "Días s/rep.",
                     width="small",
-                    help="Días desde el último reporte (historial completo)"
+                    help="Días desde el último reporte (historial completo)",
                 ),
             },
         )
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # Exportar
+        # ──────────────────────────────────────────────────────────────────
+        # BLOQUE 14 — EXPORTAR CSV
+        # ──────────────────────────────────────────────────────────────────
+        _csv_export = _df_f[[
+            "#","_cod","EQUIPO_FAMILIA","TIPO_MAQUINA","ESTADO",
+            "estado_op","ult_op","horas_periodo","litros_periodo",
+            "l_hr","ubicacion","alarma","motivo_alarm","dias_sr",
+        ]].rename(columns={
+            "_cod":          "Código",
+            "EQUIPO_FAMILIA":"Familia",
+            "TIPO_MAQUINA":  "Tipo",
+            "ESTADO":        "Estado catálogo",
+            "estado_op":     "Estado operacional",
+            "ult_op":        "Último operador",
+            "horas_periodo": "Horas período",
+            "litros_periodo":"Litros período",
+            "l_hr":          "L/hr",
+            "ubicacion":     "Ubicación",
+            "alarma":        "Alarma obra",
+            "motivo_alarm":  "Motivo alarma",
+            "dias_sr":       "Días sin reporte",
+        }).to_csv(index=False).encode("utf-8-sig")
+
         st.download_button(
-            "⬇ Exportar CSV",
-            df_f[["#","_cod","EQUIPO_FAMILIA","TIPO_MAQUINA","ESTADO",
-                  "estado_op","ult_op","horas_periodo","litros_periodo",
-                  "l_hr","alarma","motivo","dias_sr"]]
-            .rename(columns={"_cod":"Código","estado_op":"Estado Op",
-                              "ult_op":"Último operador",
-                              "horas_periodo":"Horas","litros_periodo":"Litros",
-                              "l_hr":"L/hr","alarma":"🔔 Alarma",
-                              "motivo":"Motivo","dias_sr":"Días s/rep."})
-            .to_csv(index=False).encode("utf-8-sig"),
-            "flota_ordenada.csv", "text/csv",
+            "⬇ Exportar tabla CSV",
+            _csv_export,
+            "flota_maquinas.csv",
+            "text/csv",
         )
 
 # TAB 3 — OPERADORES
