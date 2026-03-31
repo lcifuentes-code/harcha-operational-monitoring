@@ -788,69 +788,106 @@ with tab_act:
 
 
 
+
 # ════════════════════════════════════════════════════════════
-# TAB 2 — MÁQUINAS (lista fija + lógica enriquecida)
+# TAB 2 — MÁQUINAS (lista fija + reglas de negocio)
 # ════════════════════════════════════════════════════════════
 with tab_maq:
 
     # ─────────────────────────────────────────────────────────────────────────
-    # BLOQUE DE DATOS — reglas de cálculo
-    # ─────────────────────────────────────────────────────────────────────────
-    # Lista maestra FIJA  → catálogo completo (MAQUINAS sheet), orden original.
-    # Estado / operador / cambio-obra / días-sin-reporte → historial COMPLETO.
-    # Horas, litros, L/hr → filtrados por el período del selector de fechas.
+    # CONSTANTES DE NEGOCIO
     # ─────────────────────────────────────────────────────────────────────────
 
-    df_cat_full  = datos.get("maquinas",  pd.DataFrame()).copy()
-    df_rep_all   = datos["reportes"].copy()       # sin filtro de fechas
-    df_rec_all   = datos.get("recargas",  pd.DataFrame()).copy()
-    df_rep_prd   = df_rep.copy()                  # filtrado por selector
+    # IDs de máquinas DESCONTINUADAS (propietario = DESCONTINUADA en mantenciones).
+    # Se excluyen de la tabla — no aparecen en ninguna vista.
+    IDS_DESCONTINUADOS = {
+        # Camionetas descontinuadas
+        "m000101","m000103","m000107","m000108","m000110","m000111",
+        "m000132","m000133","m000139","m000142","68ae0f2a",
+        # Camiones tolva descontinuados
+        "1c3365b8","704594fd","ad9b215c","cd9197b4",
+        "m000023","m000024","m000029",
+        # Otros descontinuados
+        "m000006","m000009",    # CG-01, CP-01
+        "m000045",              # BD-01
+        "m000055",              # EX-02
+        "m000075",              # MX-01
+        "m000083",              # RX-01
+    }
+
+    # Familias EXENTAS de alarma de cambio de obra.
+    # Las camionetas no hacen reportes, por lo que no aplica la lógica.
+    FAMILIAS_SIN_ALARMA = {
+        "CAMIONETA",
+        # semirremolques, bateas, accesorios sin operación propia
+        "SEMIREMOLQUE","REMOLQUE","CAMA BAJA","Batea",
+        "ACCESORIOS","CUATRIMOTO","NO APLICA","ESTANQUE OBRA",
+        "EQUIPO MOVIL","EXTERNO","EQUIPO INTEGRADO",
+    }
+
+    # Familias que SÍ participan en alarmas (para referencia / filtros)
+    FAMILIAS_CAMIONES = {
+        "CAMION TOLVA","TRACTO CAMION","CAMION GANADERO",
+        "CAMION IMPRIMADOR Y MIXER","CAMION PLANO","CAMION PLUMA","CAMION ",
+    }
+    FAMILIAS_MAQUINARIA = {
+        "CARGADOR FRONTAL","EXCAVADORA","RETROEXCAVADORA",
+        "TRACTOR","TRACTOR ","MOTONIVELADORA","BULLDOZER",
+    }
+    FAMILIAS_OTROS = {
+        "GRUA MOVIL","PLANTAS","RODILLO","GRAVILLADORA",
+        "BARREDORA","MAQUINARIA","EQUIPO MENOR",
+    }
+    FAMILIAS_GENERADOR = {"GENERADOR"}
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # DATOS BASE
+    # ─────────────────────────────────────────────────────────────────────────
+    df_cat_full = datos.get("maquinas", pd.DataFrame()).copy()
+    df_rep_all  = datos["reportes"].copy()
+    df_rec_all  = datos.get("recargas", pd.DataFrame()).copy()
+    df_rep_prd  = df_rep.copy()   # filtrado por selector de fechas
 
     if df_cat_full.empty:
         st.info("Sin catálogo de máquinas disponible.")
     else:
+        # ── Excluir descontinuadas ─────────────────────────────────────────
+        df_cat = df_cat_full[
+            ~df_cat_full["ID_MAQUINA"].isin(IDS_DESCONTINUADOS)
+        ].copy().reset_index(drop=True)
 
-        # ── A) Actividad últimos 10 días (estado) ────────────────────────────
+        # ── A) Actividad últimos 10 días ──────────────────────────────────
         corte_10d = pd.Timestamp(fecha_fin) - pd.Timedelta(days=10)
 
-        maq_activas_10d = set()
+        maq_10d = set()
         if not df_rep_all.empty:
-            maq_activas_10d |= set(
-                df_rep_all[df_rep_all["FECHAHORA_INICIO"] >= corte_10d]["ID_MAQUINA"].dropna()
+            maq_10d |= set(
+                df_rep_all[df_rep_all["FECHAHORA_INICIO"] >= corte_10d]
+                ["ID_MAQUINA"].dropna()
             )
         if not df_rec_all.empty:
             fechas_rec = pd.to_datetime(df_rec_all["FECHA"], errors="coerce")
-            maq_activas_10d |= set(
+            maq_10d |= set(
                 df_rec_all[fechas_rec >= corte_10d]["ID_MAQUINA"].dropna()
             )
 
-        # ── B) Último operador y último reporte (historial completo) ─────────
+        # ── B) Último operador (historial completo) ───────────────────────
         ult_info = {}
         if not df_rep_all.empty:
-            grp_op = (
+            ult_info = (
                 df_rep_all.sort_values("FECHAHORA_INICIO")
                 .groupby("ID_MAQUINA")
-                .agg(
-                    ult_op = ("USUARIO_TXT",   "last"),
-                    ult_dt = ("FECHAHORA_INICIO","max"),
-                )
+                .agg(ult_op=("USUARIO_TXT","last"),
+                     ult_dt=("FECHAHORA_INICIO","max"))
+                .to_dict("index")
             )
-            ult_info = grp_op.to_dict("index")
 
-        # ── C) Cambio de obra ─────────────────────────────────────────────────
-        # Alerta 🔔 si:
-        #   C1) Últimas 2 obras de REPORTES son distintas (para esta máquina)
-        #   C2) Últimas 2 obras de RECARGAS son distintas (OBRA_ID)
-        #   C3) Última obra de REPORTES ≠ última obra de RECARGAS (sin coincidencia)
-
-        def _norm_obra(s):
-            return str(s).lower().strip() if pd.notna(s) and str(s).strip() else None
-
-        # Pre-agrupar para evitar loop O(n²)
+        # ── C) Cambio de obra (historial completo, con motivo) ────────────
+        # Pre-agrupar historial de obras
         if not df_rep_all.empty:
-            rep_sorted = df_rep_all.sort_values("FECHAHORA_INICIO")
+            rep_s = df_rep_all.sort_values("FECHAHORA_INICIO")
             hist_obras_rep = (
-                rep_sorted.groupby("ID_MAQUINA")["OBRA_TXT"]
+                rep_s.groupby("ID_MAQUINA")["OBRA_TXT"]
                 .apply(lambda s: s.dropna().tolist())
                 .to_dict()
             )
@@ -858,49 +895,68 @@ with tab_maq:
             hist_obras_rep = {}
 
         if not df_rec_all.empty:
-            rec_sorted = df_rec_all.copy()
-            rec_sorted["_f"] = pd.to_datetime(rec_sorted["FECHA"], errors="coerce")
-            rec_sorted = rec_sorted.sort_values("_f")
+            rec_s = df_rec_all.copy()
+            rec_s["_f"] = pd.to_datetime(rec_s["FECHA"], errors="coerce")
+            rec_s = rec_s.sort_values("_f")
             hist_obras_rec = (
-                rec_sorted.groupby("ID_MAQUINA")["OBRA_ID"]
+                rec_s.groupby("ID_MAQUINA")["OBRA_ID"]
                 .apply(lambda s: s.dropna().tolist())
                 .to_dict()
             )
         else:
             hist_obras_rec = {}
 
-        def cambio_obra(mid: str) -> str:
-            obras_r = hist_obras_rep.get(mid, [])
-            obras_c = hist_obras_rec.get(mid, [])
+        def _n(s):
+            """Normaliza texto de obra para comparación."""
+            return str(s).lower().strip() if pd.notna(s) and str(s).strip() else None
 
-            # C1: últimas 2 obras de reportes distintas
-            if len(obras_r) >= 2 and obras_r[-1] != obras_r[-2]:
-                return "🔔"
-            # C2: últimas 2 obras de recargas distintas
-            if len(obras_c) >= 2 and obras_c[-1] != obras_c[-2]:
-                return "🔔"
-            # C3: última obra de reporte ≠ última obra de recarga
-            ult_r = _norm_obra(obras_r[-1]) if obras_r else None
-            ult_c = _norm_obra(obras_c[-1]) if obras_c else None
+        def cambio_obra_con_motivo(mid: str, familia: str) -> tuple:
+            """Retorna (icono, motivo_texto)."""
+            # Familias exentas de alarma
+            if str(familia).strip() in FAMILIAS_SIN_ALARMA:
+                return "", ""
+
+            or_ = hist_obras_rep.get(mid, [])
+            oc_ = hist_obras_rec.get(mid, [])
+
+            # Cond 1: últimas 2 obras de reportes distintas
+            if len(or_) >= 2 and or_[-1] != or_[-2]:
+                return "🔔", (
+                    f"Cambió de obra en reportes: "
+                    f"'{str(or_[-2])[:30]}' → '{str(or_[-1])[:30]}'"
+                )
+            # Cond 2: últimas 2 obras de recargas distintas
+            if len(oc_) >= 2 and oc_[-1] != oc_[-2]:
+                return "🔔", (
+                    f"Cambió de obra en recargas: "
+                    f"'{str(oc_[-2])[:30]}' → '{str(oc_[-1])[:30]}'"
+                )
+            # Cond 3: último reporte ≠ última recarga
+            ult_r = _n(or_[-1]) if or_ else None
+            ult_c = _n(oc_[-1]) if oc_ else None
             if ult_r and ult_c and ult_r not in ult_c and ult_c not in ult_r:
-                return "🔔"
-            return ""
+                return "🔔", (
+                    f"Obra reporte ('{str(or_[-1])[:25]}') ≠ "
+                    f"obra recarga ('{str(oc_[-1])[:25]}')"
+                )
+            return "", ""
 
-        # ── D) Horas y litros del PERÍODO seleccionado ────────────────────────
+        # ── D) Horas y litros del período ─────────────────────────────────
         agg_h = pd.DataFrame(columns=["ID_MAQUINA","horas_periodo","prom_hrs_dia"])
         if not df_rep_prd.empty:
-            df_rep_prd = df_rep_prd.copy()
-            df_rep_prd["_d"] = df_rep_prd["FECHAHORA_INICIO"].dt.date
-            tmp = (
-                df_rep_prd.groupby("ID_MAQUINA")
-                .agg(horas_periodo=("HORAS_TRABAJADAS","sum"),
-                     _dias=("_d","nunique"))
+            tmp = df_rep_prd.copy()
+            tmp["_d"] = tmp["FECHAHORA_INICIO"].dt.date
+            agg_h = (
+                tmp.groupby("ID_MAQUINA")
+                .agg(horas_periodo=("HORAS_TRABAJADAS","sum"), _dias=("_d","nunique"))
                 .reset_index()
             )
-            tmp["horas_periodo"] = pd.to_numeric(tmp["horas_periodo"], errors="coerce")
-            tmp["_dias"]         = pd.to_numeric(tmp["_dias"],         errors="coerce")
-            tmp["prom_hrs_dia"]  = (tmp["horas_periodo"] / tmp["_dias"].where(tmp["_dias"] > 0)).round(1)
-            agg_h = tmp[["ID_MAQUINA","horas_periodo","prom_hrs_dia"]]
+            for _c in ["horas_periodo","_dias"]:
+                agg_h[_c] = pd.to_numeric(agg_h[_c], errors="coerce")
+            agg_h["prom_hrs_dia"] = (
+                agg_h["horas_periodo"] / agg_h["_dias"].where(agg_h["_dias"] > 0)
+            ).round(1)
+            agg_h = agg_h[["ID_MAQUINA","horas_periodo","prom_hrs_dia"]]
 
         agg_l = pd.DataFrame(columns=["ID_MAQUINA","litros_periodo"])
         if not df_rec_all.empty:
@@ -912,11 +968,13 @@ with tab_maq:
                 .sum().reset_index()
                 .rename(columns={"LITROS":"litros_periodo"})
             )
-            agg_l["litros_periodo"] = pd.to_numeric(agg_l["litros_periodo"], errors="coerce")
+            agg_l["litros_periodo"] = pd.to_numeric(
+                agg_l["litros_periodo"], errors="coerce"
+            )
 
-        # ── ENSAMBLAR TABLA MAESTRA ───────────────────────────────────────────
+        # ── Ensamblar tabla ────────────────────────────────────────────────
         tabla = (
-            df_cat_full[["ID_MAQUINA","MAQUINA","EQUIPO_FAMILIA","TIPO_MAQUINA","ESTADO"]]
+            df_cat[["ID_MAQUINA","MAQUINA","EQUIPO_FAMILIA","TIPO_MAQUINA","ESTADO"]]
             .copy().reset_index(drop=True)
         )
         tabla = tabla.merge(agg_h, on="ID_MAQUINA", how="left")
@@ -930,34 +988,41 @@ with tab_maq:
             / tabla["horas_periodo"].where(tabla["horas_periodo"] > 0)
         ).round(2)
 
+        # Columnas de historial
         ref_ts = pd.Timestamp(fecha_fin)
 
-        # Columnas de historial (vectorizadas donde sea posible)
-        tabla["en_prod"] = tabla["ESTADO"].apply(
+        tabla["en_prod"]    = tabla["ESTADO"].apply(
             lambda s: str(s).strip() in ESTADOS_ACTIVOS
         )
-        tabla["activa_10d"] = tabla["ID_MAQUINA"].isin(maq_activas_10d)
+        tabla["activa_10d"] = tabla["ID_MAQUINA"].isin(maq_10d)
 
         def _estado_op(row):
-            if not row["en_prod"]:        return "Fuera de producción"
-            if not row["activa_10d"]:     return "Sin reporte"
+            if not row["en_prod"]:    return "Fuera de producción"
+            if not row["activa_10d"]: return "Sin reporte"
             p = row["prom_hrs_dia"]
-            if pd.notna(p) and p < 4:     return "Bajo rendimiento"
+            if pd.notna(p) and p < 4: return "Bajo rendimiento"
             return "Activa"
 
         tabla["estado_op"] = tabla.apply(_estado_op, axis=1)
 
-        tabla["ult_operador"] = tabla["ID_MAQUINA"].apply(
-            lambda m: str(ult_info.get(m, {}).get("ult_op", "—"))[:35]
+        tabla["ult_op"] = tabla["ID_MAQUINA"].apply(
+            lambda m: str(ult_info.get(m,{}).get("ult_op","—"))[:35]
         )
-        tabla["cambio_obra"] = tabla["ID_MAQUINA"].apply(cambio_obra)
         tabla["dias_sr"] = tabla["ID_MAQUINA"].apply(
             lambda m: int((ref_ts - ult_info[m]["ult_dt"]).days)
                       if m in ult_info and pd.notna(ult_info[m]["ult_dt"])
                       else None
         )
 
-        # ── KPIs ──────────────────────────────────────────────────────────────
+        # Cambio de obra con motivo
+        cambio_results = tabla.apply(
+            lambda row: cambio_obra_con_motivo(row["ID_MAQUINA"], row["EQUIPO_FAMILIA"]),
+            axis=1,
+        )
+        tabla["cambio_obra"]  = cambio_results.apply(lambda x: x[0])
+        tabla["motivo_alarm"] = cambio_results.apply(lambda x: x[1])
+
+        # ── KPIs ──────────────────────────────────────────────────────────
         n_tot   = len(tabla)
         n_act   = (tabla["estado_op"] == "Activa").sum()
         n_sr    = (tabla["estado_op"] == "Sin reporte").sum()
@@ -966,41 +1031,52 @@ with tab_maq:
         n_alarm = (tabla["cambio_obra"] == "🔔").sum()
 
         k1,k2,k3,k4,k5,k6 = st.columns(6)
-        k1.metric("Total flota",        n_tot)
-        k2.metric("✅ Activas",           n_act)
-        k3.metric("🚨 Sin reporte (10d)", n_sr,
+        k1.metric("Total flota",         n_tot,
+                  help="Excluye máquinas descontinuadas")
+        k2.metric("✅ Activas",            n_act,
+                  help="Alguna acción en los últimos 10 días")
+        k3.metric("🚨 Sin reporte (10d)",  n_sr,
                   delta=f"-{n_sr}" if n_sr else None, delta_color="inverse")
-        k4.metric("⚠️ Bajo rendimiento",  n_br,
+        k4.metric("⚠️ Bajo rendimiento",   n_br,
                   delta=f"-{n_br}" if n_br else None, delta_color="inverse")
-        k5.metric("🔘 Fuera producción",  n_fp)
-        k6.metric("🔔 Cambio de obra",    n_alarm,
-                  delta=f"{n_alarm}" if n_alarm else None, delta_color="inverse")
+        k5.metric("🔘 Fuera producción",   n_fp)
+        k6.metric("🔔 Cambio de obra",     n_alarm,
+                  delta=f"{n_alarm}" if n_alarm else None,
+                  delta_color="inverse",
+                  help="Aplica solo a camiones y maquinaria — excluye camionetas")
 
         st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 
-        # ── FILTROS ───────────────────────────────────────────────────────────
+        # ── FILTROS ────────────────────────────────────────────────────────
         st.markdown('<div class="seccion">', unsafe_allow_html=True)
         st.markdown('<div class="seccion-titulo">🔍 Filtros</div>',
                     unsafe_allow_html=True)
         fc1,fc2,fc3,fc4 = st.columns([2,2,1,3])
+
         with fc1:
-            familias = ["Todas"] + sorted(
+            familias_disp = ["Todas"] + sorted(
                 tabla["EQUIPO_FAMILIA"].dropna().unique().tolist()
             )
-            fam_sel = st.selectbox("Familia de equipo", familias)
+            fam_sel = st.selectbox("Familia de equipo", familias_disp)
+
         with fc2:
-            estados = ["Todos"] + sorted(
+            estados_disp = ["Todos"] + sorted(
                 tabla["estado_op"].dropna().unique().tolist()
             )
-            est_sel = st.selectbox("Estado operacional", estados)
+            est_sel = st.selectbox("Estado operacional", estados_disp)
+
         with fc3:
             solo_alarm = st.checkbox("🔔 Solo alarmas")
+
         with fc4:
-            q = st.text_input("🔎 Buscar",
-                              placeholder="Nombre, código, familia, patente…")
+            q = st.text_input(
+                "🔎 Buscar",
+                placeholder="Nombre, código, familia, tipo…"
+            )
+
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # ── APLICAR FILTROS ───────────────────────────────────────────────────
+        # ── Aplicar filtros ────────────────────────────────────────────────
         df_f = tabla.copy()
         if fam_sel  != "Todas": df_f = df_f[df_f["EQUIPO_FAMILIA"] == fam_sel]
         if est_sel  != "Todos": df_f = df_f[df_f["estado_op"]      == est_sel]
@@ -1015,20 +1091,21 @@ with tab_maq:
             )
             df_f = df_f[mask]
 
-        # ── PREPARAR VISTA ────────────────────────────────────────────────────
+        # ── Vista final ────────────────────────────────────────────────────
         df_v = df_f[[
-            "MAQUINA","EQUIPO_FAMILIA","estado_op","ult_operador",
+            "MAQUINA","EQUIPO_FAMILIA","estado_op","ult_op",
             "horas_periodo","litros_periodo","l_hr",
-            "cambio_obra","dias_sr",
+            "cambio_obra","motivo_alarm","dias_sr",
         ]].copy().rename(columns={
             "MAQUINA":         "Máquina",
             "EQUIPO_FAMILIA":  "Familia",
             "estado_op":       "Estado",
-            "ult_operador":    "Último operador",
+            "ult_op":          "Último operador",
             "horas_periodo":   "Horas período",
             "litros_periodo":  "Litros período",
             "l_hr":            "L/hr",
-            "cambio_obra":     "🔔 Obra",
+            "cambio_obra":     "🔔",
+            "motivo_alarm":    "Motivo alarma",
             "dias_sr":         "Días sin reporte",
         })
 
@@ -1045,16 +1122,16 @@ with tab_maq:
             lambda x: f"{int(x)} días" if pd.notna(x) else "Sin historial"
         )
 
-        # ── TABLA ─────────────────────────────────────────────────────────────
+        # ── Tabla ──────────────────────────────────────────────────────────
         st.markdown(
             f'<div class="seccion">'
             f'<div class="seccion-titulo">'
-            f'📋 Flota completa — {len(df_v)} de {n_tot} máquinas'
+            f'📋 Flota activa — {len(df_v)} de {n_tot} máquinas'
             f'<span style="font-size:11px;color:var(--texto-3);'
             f'font-weight:400;margin-left:10px">'
             f'Horas/Litros: {fecha_ini.strftime("%d/%m/%Y")} → '
             f'{fecha_fin.strftime("%d/%m/%Y")}'
-            f' · Estado/Operador/Cambio obra: historial completo'
+            f' · Estado/Operador/Alarmas: historial completo'
             f'</span></div>',
             unsafe_allow_html=True,
         )
@@ -1067,18 +1144,35 @@ with tab_maq:
             column_config={
                 "Estado": st.column_config.TextColumn(
                     "Estado",
-                    help="Activa = alguna acción en últimos 10 días · "
-                         "Sin reporte = sin actividad 10 días · "
-                         "Bajo rendimiento = < 4 hrs/día promedio"
+                    help=(
+                        "✅ Activa = acción en últimos 10 días\n"
+                        "🚨 Sin reporte = sin actividad 10 días\n"
+                        "⚠️ Bajo rendimiento = < 4 hrs/día promedio\n"
+                        "🔘 Fuera de producción = estado en catálogo"
+                    ),
                 ),
-                "🔔 Obra": st.column_config.TextColumn(
-                    "🔔 Obra",
-                    help="🔔 = últimas 2 acciones en obras distintas "
-                         "O último reporte y última recarga en obras distintas"
+                "🔔": st.column_config.TextColumn(
+                    "🔔",
+                    width="small",
+                    help="🔔 = cambio de obra detectado. Ver columna 'Motivo alarma' para el detalle.",
+                ),
+                "Motivo alarma": st.column_config.TextColumn(
+                    "Motivo alarma",
+                    help=(
+                        "Razón del cambio de obra:\n"
+                        "• Últimas 2 obras de reportes distintas\n"
+                        "• Últimas 2 obras de recargas distintas\n"
+                        "• Obra de último reporte ≠ obra de última recarga\n"
+                        "Camionetas y semirremolques están exentos."
+                    ),
                 ),
                 "Días sin reporte": st.column_config.TextColumn(
                     "Días sin reporte",
-                    help="Días desde el último reporte (historial completo)"
+                    help="Días desde el último reporte (historial completo)",
+                ),
+                "L/hr": st.column_config.TextColumn(
+                    "L/hr",
+                    help="Litros consumidos por hora trabajada en el período",
                 ),
             },
         )
@@ -1087,8 +1181,10 @@ with tab_maq:
         st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
         rb1,rb2,rb3,rb4 = st.columns(4)
         for _col, _lbl, _cls in [
-            (rb1,"Activa","verde"), (rb2,"Sin reporte","rojo"),
-            (rb3,"Bajo rendimiento","ambar"), (rb4,"Fuera de producción","azul"),
+            (rb1,"Activa","verde"),
+            (rb2,"Sin reporte","rojo"),
+            (rb3,"Bajo rendimiento","ambar"),
+            (rb4,"Fuera de producción","azul"),
         ]:
             _n = (df_v["Estado"] == _lbl).sum()
             _col.markdown(
@@ -1103,9 +1199,9 @@ with tab_maq:
         # Exportar
         st.download_button(
             "⬇ Exportar CSV",
-            df_f[["ID_MAQUINA","MAQUINA","EQUIPO_FAMILIA","TIPO_MAQUINA",
-                  "ESTADO","estado_op","ult_operador","horas_periodo",
-                  "litros_periodo","l_hr","cambio_obra","dias_sr"]]
+            df_f[["ID_MAQUINA","MAQUINA","EQUIPO_FAMILIA","TIPO_MAQUINA","ESTADO",
+                  "estado_op","ult_op","horas_periodo","litros_periodo","l_hr",
+                  "cambio_obra","motivo_alarm","dias_sr"]]
             .to_csv(index=False).encode("utf-8-sig"),
             "flota.csv", "text/csv",
         )
