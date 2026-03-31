@@ -1162,6 +1162,34 @@ with tab_maq:
             .to_dict()
         )
 
+    # D3b. Historial COMBINADO (reportes + recargas) con timestamp y fuente.
+    # Usado por la nueva lógica de alarma de cambio de obra.
+    # Formato por máquina: lista de (timestamp, obra_str, fuente) ordenada por fecha asc.
+    _hist_comb: dict = {}
+
+    if not _df_rep_hist.empty:
+        for _mid, _grp in _df_rep_hist.dropna(
+            subset=["OBRA_TXT"]
+        ).groupby("ID_MAQUINA"):
+            _hist_comb[_mid] = [
+                (row["FECHAHORA_INICIO"], str(row["OBRA_TXT"]).strip(), "REP")
+                for _, row in _grp[["FECHAHORA_INICIO","OBRA_TXT"]].iterrows()
+                if str(row["OBRA_TXT"]).strip()
+            ]
+
+    if not _df_rec_hist.empty:
+        _rtmp = _df_rec_hist.copy()
+        _rtmp["_f"] = pd.to_datetime(_rtmp["FECHA"], errors="coerce")
+        for _mid, _grp in _rtmp.dropna(
+            subset=["OBRA_ID","_f"]
+        ).groupby("ID_MAQUINA"):
+            _evs = _hist_comb.get(_mid, [])
+            for _, _row in _grp[["_f","OBRA_ID"]].iterrows():
+                _ob = str(_row["OBRA_ID"]).strip()
+                if _ob and _ob != "nan":
+                    _evs.append((_row["_f"], _ob, "REC"))
+            _hist_comb[_mid] = sorted(_evs, key=lambda x: x[0])
+
     # ────────────────────────────────────────────────────────────────────────
     # BLOQUE E — DATOS DINÁMICOS (dependen del período seleccionado)
     # ────────────────────────────────────────────────────────────────────────
@@ -1245,50 +1273,84 @@ with tab_maq:
                   if pd.notna(m) and _ult.get(m,{}).get("_ob") else "Sin datos"
     )
 
-    # G4. Cambio de obra — función con motivo detallado
+    # G4. Cambio de obra — lógica mejorada con historial combinado
+    # ────────────────────────────────────────────────────────────
+    # Aplica SOLO a maquinaria operacional pesada.
+    # NO aplica a camionetas, camiones de flete ni generadores.
+
     _FAMILIAS_SIN_ALARMA = {
-        "Camioneta","Generador","Semiremolque","Remolque",
-        "Otros","Planta",
+        # Camionetas (no hacen reportes operacionales)
+        "Camioneta",
+        # Camiones de flete / transporte
+        "Camión Aljibe", "Camión Ganadero", "Camión Mixer",
+        "Camión Plano", "Camión Pluma", "Camión Plano/Pluma",
+        "Camión Slurry", "Tracto Camión", "Camión Imprimad",
+        # Generadores (equipos fijos)
+        "Generador",
     }
 
-    def _cambio_obra(mid, familia) -> tuple:
+    def _cambio_obra_v2(mid, familia) -> tuple:
         """
-        Detecta cambio de obra. Retorna (icono, motivo).
-        Familias en _FAMILIAS_SIN_ALARMA quedan exentas.
-        Reglas:
-          R1: Últimas 2 obras de REPORTES distintas.
-          R2: Últimas 2 obras de RECARGAS distintas.
-          R3: Última obra de reporte ≠ última de recarga.
+        Detecta cambio de obra usando historial COMBINADO (reportes + combustible).
+
+        Aplica a: Camión Tolva, Excavadora, Mini Excavadora, Retroexcavadora,
+                  Motoniveladora, Bulldozer, Tractor, Cargador Frontal,
+                  Minicargador, Grúa Móvil, Rodillo, Gravilladora,
+                  Barredora, Planta y Otros.
+
+        Lógica sobre los últimos 5 eventos cronológicos combinados:
+          CASO 1: más de 1 obra distinta → ALERTA
+          CASO 2: obra actual ≠ obra más frecuente histórica → ALERTA
+          CASO 3: última obra de reporte ≠ última obra de recarga → ALERTA
+
+        Retorna: (flag bool, detalle str)
         """
         if pd.isna(mid) or str(familia) in _FAMILIAS_SIN_ALARMA:
-            return ("", "")
+            return (False, "")
 
-        _or = _hist_rep_ob.get(mid, [])
-        _oc = _hist_rec_ob.get(mid, [])
+        eventos = _hist_comb.get(mid, [])
+        if not eventos:
+            return (False, "")
 
-        # R1: cambio consecutivo en reportes
-        if len(_or) >= 2 and _or[-1] != _or[-2]:
-            return ("🔔",
-                    f"Reportes: '{str(_or[-2])[:28]}' → '{str(_or[-1])[:28]}'")
+        # Últimos 5 eventos del historial combinado (ya está ordenado por fecha asc)
+        ultimos    = eventos[-5:]
+        obras_ult  = [e[1] for e in ultimos]
 
-        # R2: cambio consecutivo en recargas
-        if len(_oc) >= 2 and _oc[-1] != _oc[-2]:
-            return ("🔔",
-                    f"Recargas: '{str(_oc[-2])[:28]}' → '{str(_oc[-1])[:28]}'")
+        # CASO 1: más de 1 obra distinta en los últimos 5 registros
+        obras_unicas = list(dict.fromkeys(obras_ult))   # dedup, preserva orden
+        if len(obras_unicas) > 1:
+            secuencia = " → ".join(o[:20] for o in obras_unicas[:5])
+            return (True, f"Cambio detectado: {secuencia}")
 
-        # R3: reporte vs recarga apuntan a obras distintas
-        _ur = str(_or[-1]).lower().strip() if _or else None
-        _uc = str(_oc[-1]).lower().strip() if _oc else None
-        if _ur and _uc and _ur not in _uc and _uc not in _ur:
-            return ("🔔",
-                    f"Rep. ('{str(_or[-1])[:22]}') ≠ rec. ('{str(_oc[-1])[:22]}')")
+        # CASO 2: obra actual ≠ obra más frecuente del historial completo
+        from collections import Counter as _Counter
+        todas_obras   = [e[1] for e in eventos]
+        obra_actual   = obras_ult[-1] if obras_ult else None
+        obra_habitual = _Counter(todas_obras).most_common(1)[0][0] \
+                        if todas_obras else None
+        if obra_actual and obra_habitual and obra_actual != obra_habitual:
+            return (True,
+                    f"Actual ('{obra_actual[:22]}') ≠ "
+                    f"habitual ('{obra_habitual[:22]}')")
 
-        return ("", "")
+        # CASO 3: última obra de reporte ≠ última obra de recarga
+        _obras_rep = [e[1] for e in eventos if e[2] == "REP"]
+        _obras_rec = [e[1] for e in eventos if e[2] == "REC"]
+        if _obras_rep and _obras_rec:
+            _ur = _obras_rep[-1].lower().strip()
+            _uc = _obras_rec[-1].lower().strip()
+            if _ur and _uc and _ur not in _uc and _uc not in _ur:
+                return (True,
+                        f"Rep. ('{_obras_rep[-1][:22]}') ≠ "
+                        f"rec. ('{_obras_rec[-1][:22]}')")
+
+        return (False, "")
 
     _cambio_res = _tabla.apply(
-        lambda r: _cambio_obra(r["ID_MAQUINA"], r["FAMILIA"]), axis=1
+        lambda r: _cambio_obra_v2(r["ID_MAQUINA"], r["FAMILIA"]), axis=1
     )
-    _tabla["alarma"] = _cambio_res.apply(lambda x: x[0])
+    # Convertir flag bool → icono para columna visible, guardar detalle completo
+    _tabla["alarma"] = _cambio_res.apply(lambda x: "🔔" if x[0] else "")
     _tabla["motivo"] = _cambio_res.apply(lambda x: x[1])
 
     # G5. Días sin reporte
@@ -1429,7 +1491,11 @@ with tab_maq:
     })
 
     # ────────────────────────────────────────────────────────────────────────
-    # BLOQUE K — TABLA
+    # BLOQUE K — TABLA CON SELECCIÓN DE FILA
+    # ────────────────────────────────────────────────────────────────────────
+    # Usa on_select="rerun" para detectar la fila seleccionada sin checkboxes.
+    # El detalle de la alarma se muestra debajo (NO en popup).
+    # La columna "Motivo alarma" se oculta de la vista pero se conserva en _df_v.
     # ────────────────────────────────────────────────────────────────────────
 
     st.markdown(
@@ -1439,20 +1505,28 @@ with tab_maq:
         f'<span style="font-size:11px;color:var(--texto-3);font-weight:400;margin-left:10px">'
         f'Horas/Litros: {fecha_ini.strftime("%d/%m/%Y")} → {fecha_fin.strftime("%d/%m/%Y")}'
         f'  ·  Estado/Alarmas: historial completo'
+        f'  ·  <i>Haz clic en una fila para ver detalle</i>'
         f'</span></div>',
         unsafe_allow_html=True,
     )
 
-    st.dataframe(
-        _df_v,
+    # Columnas visibles en la tabla (Motivo alarma se oculta — se muestra en panel)
+    _cols_tabla = ["#","Código","Familia","Estado","Último operador",
+                   "Horas","Litros","L/hr","Ubicación","🔔","Días s/rep."]
+
+    _evento_sel = st.dataframe(
+        _df_v[_cols_tabla],
         use_container_width=True,
         hide_index=True,
         height=min(40 * len(_df_v) + 42, 640),
+        on_select="rerun",
+        selection_mode="single-row",
+        key="maq_sel_tbl",
         column_config={
             "#": st.column_config.NumberColumn("#", width="small", format="%d"),
             "Código": st.column_config.TextColumn(
                 "Código", width="small",
-                help="Código limpio extraído del catálogo. Fuente: MAQUINAS_BASE."
+                help="Código limpio del catálogo MAQUINAS_BASE."
             ),
             "Familia": st.column_config.TextColumn("Familia"),
             "Estado": st.column_config.TextColumn(
@@ -1464,41 +1538,22 @@ with tab_maq:
                     "⚫ Sin datos     — máquina en base pero no en sistema"
                 ),
             ),
-            "Último operador": st.column_config.TextColumn(
-                "Último operador",
-                help="Operador del último reporte en todo el historial disponible."
-            ),
-            "Horas": st.column_config.TextColumn(
-                "Horas", width="small",
-                help="Suma de horas trabajadas en el período seleccionado."
-            ),
-            "Litros": st.column_config.TextColumn(
-                "Litros", width="small",
-                help="Suma de litros de combustible en el período seleccionado."
-            ),
-            "L/hr": st.column_config.TextColumn(
-                "L/hr", width="small",
-                help="Rendimiento: litros por hora trabajada en el período."
-            ),
-            "Ubicación": st.column_config.TextColumn(
-                "Ubicación",
-                help="Última obra reportada en el historial completo."
-            ),
+            "Último operador": st.column_config.TextColumn("Último operador"),
+            "Horas":   st.column_config.TextColumn("Horas",   width="small",
+                help="Suma de horas trabajadas en el período seleccionado."),
+            "Litros":  st.column_config.TextColumn("Litros",  width="small",
+                help="Suma de litros de combustible en el período."),
+            "L/hr":    st.column_config.TextColumn("L/hr",    width="small",
+                help="Rendimiento: litros / hora trabajada en el período."),
+            "Ubicación": st.column_config.TextColumn("Ubicación",
+                help="Última obra reportada (historial completo)."),
             "🔔": st.column_config.TextColumn(
                 "🔔", width="small",
                 help=(
                     "🔔 = cambio de obra detectado.\n"
-                    "Ver columna 'Motivo alarma' para el detalle.\n"
-                    "Camionetas y generadores están exentos."
-                ),
-            ),
-            "Motivo alarma": st.column_config.TextColumn(
-                "Motivo alarma",
-                help=(
-                    "Razón del 🔔:\n"
-                    "R1: Últimas 2 obras de reportes son distintas.\n"
-                    "R2: Últimas 2 obras de recargas son distintas.\n"
-                    "R3: Obra de último reporte ≠ obra de última recarga."
+                    "Haz clic en la fila para ver el detalle.\n"
+                    "Aplica a Camión Tolva, Excavadora, Retroexcavadora,\n"
+                    "Motoniveladora, Bulldozer y otros equipos operacionales."
                 ),
             ),
             "Días s/rep.": st.column_config.TextColumn(
@@ -1510,13 +1565,103 @@ with tab_maq:
 
     st.markdown("</div>", unsafe_allow_html=True)
 
+    # ── Panel de detalle de fila seleccionada ─────────────────────────────
+    _filas_sel = _evento_sel.selection.rows if _evento_sel else []
+    _codigo_sel = None   # usado luego en la exportación por máquina
+
+    if _filas_sel:
+        _idx_sel  = _filas_sel[0]
+        _fila_sel = _df_v.iloc[_idx_sel]
+        _codigo_sel  = _fila_sel["Código"]
+        _familia_sel = _fila_sel["Familia"]
+        _alarma_sel  = _fila_sel["🔔"]
+        _motivo_sel  = _fila_sel.get("Motivo alarma", "")
+        _est_sel_    = _fila_sel["Estado"]
+        _op_sel      = _fila_sel["Último operador"]
+        _hrs_sel     = _fila_sel["Horas"]
+        _lit_sel     = _fila_sel["Litros"]
+        _dia_sel     = _fila_sel["Días s/rep."]
+
+        with st.container():
+            if _alarma_sel == "🔔" and _motivo_sel:
+                st.markdown(f"""
+                <div style="background:#FEF2F2;border:1px solid #FCA5A5;
+                            border-left:4px solid #EF4444;border-radius:8px;
+                            padding:12px 16px;margin:8px 0">
+                    <div style="font-size:13px;font-weight:700;color:#B91C1C;
+                                margin-bottom:4px">
+                        🔔 {_codigo_sel} — Cambio de obra detectado
+                    </div>
+                    <div style="font-size:12px;color:#7F1D1D">{_motivo_sel}</div>
+                    <div style="font-size:11px;color:#9CA3AF;margin-top:4px">
+                        {_familia_sel} · {_est_sel_} · Op: {_op_sel}
+                        · Horas: {_hrs_sel} · Litros: {_lit_sel}
+                        · Sin reporte: {_dia_sel}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown(f"""
+                <div style="background:#EFF6FF;border:1px solid #BFDBFE;
+                            border-left:4px solid #3B82F6;border-radius:8px;
+                            padding:12px 16px;margin:8px 0">
+                    <div style="font-size:13px;font-weight:700;color:#1E40AF;
+                                margin-bottom:4px">
+                        📋 {_codigo_sel} — {_familia_sel}
+                    </div>
+                    <div style="font-size:12px;color:#1E3A8A">
+                        {_est_sel_} · Operador: {_op_sel}
+                        · Horas: {_hrs_sel} · Litros: {_lit_sel}
+                        · Sin reporte: {_dia_sel}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
     # ────────────────────────────────────────────────────────────────────────
-    # BLOQUE L — EXPORTAR
+    # BLOQUE L — EXPORTACIONES
+    # ────────────────────────────────────────────────────────────────────────
+    # A. Exportación general (tabla visible → CSV o Excel)
+    # B. Exportación por máquina (multi-hoja Excel con historial completo)
     # ────────────────────────────────────────────────────────────────────────
 
-    st.download_button(
-        "⬇ Exportar CSV",
-        _df_f[[
+    import io as _io_exp
+    import openpyxl as _opxl
+    from openpyxl.styles import Font as _Font, PatternFill as _PFill, Alignment as _Align
+
+    # ── Función helper: DataFrame → hoja de Excel con cabecera estilizada ──
+    def _df_a_hoja(ws, df, titulo_col=None):
+        """Escribe df en ws de openpyxl. Cabecera en negrita con fondo gris."""
+        if titulo_col:
+            ws.append([titulo_col])
+            ws.cell(1, 1).font = _Font(bold=True, size=12)
+            ws.append([])
+
+        # Cabecera
+        headers = list(df.columns)
+        ws.append(headers)
+        hdr_row = ws.max_row
+        for col_i, _ in enumerate(headers, 1):
+            cell = ws.cell(hdr_row, col_i)
+            cell.font = _Font(bold=True, color="FFFFFF")
+            cell.fill = _PFill("solid", fgColor="1E40AF")
+            cell.alignment = _Align(horizontal="center")
+
+        # Datos
+        for row in df.itertuples(index=False):
+            ws.append(list(row))
+
+        # Ancho automático (aproximado)
+        for col in ws.columns:
+            max_len = max((len(str(c.value or "")) for c in col), default=8)
+            ws.column_dimensions[col[0].column_letter].width = min(max_len + 2, 45)
+
+    # ── A. Exportación general ─────────────────────────────────────────────
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+    _col_exp1, _col_exp2 = st.columns([1, 1])
+
+    with _col_exp1:
+        # CSV — tabla filtrada
+        _csv_export = _df_f[[
             "#","CODIGO_LIMPIO","FAMILIA","estado_op","ult_op",
             "horas","litros","l_hr","ubicacion","alarma","motivo","dias_sr"
         ]].rename(columns={
@@ -1526,9 +1671,183 @@ with tab_maq:
             "l_hr":"L/hr",               "ubicacion":"Ubicación",
             "alarma":"Alarma",           "motivo":"Motivo alarma",
             "dias_sr":"Días sin reporte",
-        }).to_csv(index=False).encode("utf-8-sig"),
-        "maquinas_base.csv", "text/csv",
-    )
+        }).to_csv(index=False).encode("utf-8-sig")
+
+        st.download_button(
+            "📥 Exportar tabla (CSV)",
+            _csv_export,
+            "maquinas_tabla.csv",
+            "text/csv",
+            use_container_width=True,
+        )
+
+    with _col_exp2:
+        # Excel — tabla filtrada con formato
+        _wb_gen = _opxl.Workbook()
+        _ws_gen = _wb_gen.active
+        _ws_gen.title = "Máquinas"
+
+        _df_excel_gen = _df_f[[
+            "#","CODIGO_LIMPIO","FAMILIA","estado_op","ult_op",
+            "horas","litros","l_hr","ubicacion","alarma","motivo","dias_sr"
+        ]].rename(columns={
+            "CODIGO_LIMPIO":"Código",    "FAMILIA":"Familia",
+            "estado_op":"Estado",        "ult_op":"Último operador",
+            "horas":"Horas período",     "litros":"Litros período",
+            "l_hr":"L/hr",               "ubicacion":"Ubicación",
+            "alarma":"Alarma",           "motivo":"Motivo alarma",
+            "dias_sr":"Días sin reporte",
+        })
+        _df_a_hoja(_ws_gen, _df_excel_gen)
+        _buf_gen = _io_exp.BytesIO()
+        _wb_gen.save(_buf_gen)
+        _buf_gen.seek(0)
+
+        st.download_button(
+            "📊 Exportar tabla (Excel)",
+            _buf_gen.getvalue(),
+            "maquinas_tabla.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+
+    # ── B. Exportación por máquina seleccionada ────────────────────────────
+    if _codigo_sel:
+        st.markdown(f"""
+        <div style="font-size:12px;color:var(--texto-2);margin-top:4px;margin-bottom:6px">
+            Máquina seleccionada: <b>{_codigo_sel}</b>
+            — Disponible exportación de historial completo
+        </div>""", unsafe_allow_html=True)
+
+        # Obtener ID_MAQUINA de la selección
+        _id_sel = _df_f[_df_f["CODIGO_LIMPIO"] == _codigo_sel]["ID_MAQUINA"].iloc[0] \
+                  if not _df_f[_df_f["CODIGO_LIMPIO"] == _codigo_sel].empty else None
+
+        if _id_sel and pd.notna(_id_sel):
+            # Datos de la fila seleccionada (de _tabla, no _df_v)
+            _row_sel = _tabla[_tabla["ID_MAQUINA"] == _id_sel].iloc[0]
+
+            # Historial completo de reportes y recargas para esta máquina
+            _rep_maq = _df_rep_hist[
+                _df_rep_hist["ID_MAQUINA"] == _id_sel
+            ].sort_values("FECHAHORA_INICIO", ascending=False).copy()
+
+            _rec_maq = _df_rec_hist[
+                _df_rec_hist["ID_MAQUINA"] == _id_sel
+            ].copy()
+            if not _rec_maq.empty:
+                _rec_maq["_f"] = pd.to_datetime(_rec_maq["FECHA"], errors="coerce")
+                _rec_maq = _rec_maq.sort_values("_f", ascending=False)
+
+            # Marcar registros dentro del período seleccionado
+            if not _rep_maq.empty:
+                _rep_maq["en_periodo"] = (
+                    (_rep_maq["FECHAHORA_INICIO"].dt.date >= fecha_ini) &
+                    (_rep_maq["FECHAHORA_INICIO"].dt.date <= fecha_fin)
+                )
+
+            if not _rec_maq.empty:
+                _rec_maq["en_periodo"] = (
+                    (_rec_maq["_f"].dt.date >= fecha_ini) &
+                    (_rec_maq["_f"].dt.date <= fecha_fin)
+                )
+
+            # Secuencia de obras para análisis
+            _eventos_maq = _hist_comb.get(_id_sel, [])
+            _seq_obras = [
+                {"Fecha": e[0], "Obra": e[1], "Fuente": e[2]}
+                for e in _eventos_maq
+            ]
+            _df_seq = pd.DataFrame(_seq_obras) if _seq_obras else pd.DataFrame(
+                columns=["Fecha","Obra","Fuente"]
+            )
+
+            # Construir Excel multi-hoja
+            _wb_maq = _opxl.Workbook()
+
+            # HOJA 1: RESUMEN
+            _ws1 = _wb_maq.active
+            _ws1.title = "Resumen"
+            _resumen_rows = [
+                ["Máquina",           _codigo_sel],
+                ["Familia",           _row_sel["FAMILIA"]],
+                ["Estado",            _row_sel["estado_op"]],
+                ["Período desde",     str(fecha_ini)],
+                ["Período hasta",     str(fecha_fin)],
+                ["Horas período",     _row_sel["horas"]],
+                ["Litros período",    _row_sel["litros"]],
+                ["L/hr",              _row_sel["l_hr"]],
+                ["Último operador",   _row_sel["ult_op"]],
+                ["Última ubicación",  _row_sel["ubicacion"]],
+                ["Días sin reporte",  _row_sel["dias_sr"] if pd.notna(_row_sel["dias_sr"]) else "Sin historial"],
+                ["Cambio de obra",    "Sí — " + _row_sel["motivo"] if _row_sel["alarma"] == "🔔" else "No"],
+            ]
+            for _r in _resumen_rows:
+                _ws1.append(_r)
+                _ws1.cell(_ws1.max_row, 1).font = _Font(bold=True)
+            _ws1.column_dimensions["A"].width = 22
+            _ws1.column_dimensions["B"].width = 45
+
+            # HOJA 2: REPORTES (historial completo)
+            _ws2 = _wb_maq.create_sheet("Reportes")
+            if not _rep_maq.empty:
+                _cols_rep = [c for c in [
+                    "FECHAHORA_INICIO","HORAS_TRABAJADAS","USUARIO_TXT",
+                    "OBRA_TXT","MAQUINA_TXT","DESCRIPCION","en_periodo"
+                ] if c in _rep_maq.columns]
+                _df_a_hoja(_ws2, _rep_maq[_cols_rep].rename(columns={
+                    "FECHAHORA_INICIO":"Fecha/Hora","HORAS_TRABAJADAS":"Horas",
+                    "USUARIO_TXT":"Operador","OBRA_TXT":"Obra",
+                    "MAQUINA_TXT":"Máquina","DESCRIPCION":"Descripción",
+                    "en_periodo":"En período",
+                }))
+            else:
+                _ws2.append(["Sin reportes en el historial"])
+
+            # HOJA 3: COMBUSTIBLE (historial completo)
+            _ws3 = _wb_maq.create_sheet("Combustible")
+            if not _rec_maq.empty:
+                _cols_rec = [c for c in [
+                    "_f","LITROS","USUARIO_ID","OBRA_ID","ODOMETRO","en_periodo"
+                ] if c in _rec_maq.columns]
+                _df_a_hoja(_ws3, _rec_maq[_cols_rec].rename(columns={
+                    "_f":"Fecha","LITROS":"Litros","USUARIO_ID":"Responsable",
+                    "OBRA_ID":"Obra","ODOMETRO":"Odómetro",
+                    "en_periodo":"En período",
+                }))
+            else:
+                _ws3.append(["Sin recargas en el historial"])
+
+            # HOJA 4: ANÁLISIS DE OBRA (secuencia cronológica)
+            _ws4 = _wb_maq.create_sheet("Análisis obra")
+            if not _df_seq.empty:
+                _df_a_hoja(_ws4, _df_seq)
+                # Agregar resumen de obras al final
+                from collections import Counter as _Cnt
+                _conteo_obras = _Cnt(_df_seq["Obra"].tolist()).most_common()
+                _ws4.append([])
+                _ws4.append(["OBRA MÁS FRECUENTE:", _conteo_obras[0][0] if _conteo_obras else "—"])
+                _ws4.append(["TOTAL EVENTOS:",       len(_df_seq)])
+                _ws4.append(["OBRAS DISTINTAS:",     _df_seq["Obra"].nunique()])
+            else:
+                _ws4.append(["Sin historial de obras disponible"])
+
+            # Guardar y ofrecer descarga
+            _buf_maq = _io_exp.BytesIO()
+            _wb_maq.save(_buf_maq)
+            _buf_maq.seek(0)
+
+            st.download_button(
+                f"📄 Exportar historial de {_codigo_sel} (Excel)",
+                _buf_maq.getvalue(),
+                f"historial_{_codigo_sel.replace('-','_')}.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+        else:
+            st.caption("⚠ Esta máquina no tiene ID vinculado en el sistema.")
+    else:
+        st.caption("💡 Haz clic en una fila de la tabla para habilitar la exportación individual.")
 
 # TAB 3 — OPERADORES
 # ════════════════════════════════════════════════════════════
