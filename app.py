@@ -1163,8 +1163,70 @@ with tab_maq:
         )
 
     # D3b. Historial COMBINADO (reportes + recargas) con timestamp y fuente.
-    # Usado por la nueva lógica de alarma de cambio de obra.
-    # Formato por máquina: lista de (timestamp, obra_str, fuente) ordenada por fecha asc.
+    # ─────────────────────────────────────────────────────────────────────
+    # NORMALIZACIÓN DE OBRAS (crítico para eliminar falsos positivos):
+    #
+    # El campo OBRA_ID de recargas contiene dos tipos de valores:
+    #   Tipo A: ID real corto (ej: "11375235", "db040f27") → mapear a nombre
+    #   Tipo B: texto directo (ej: "DV04 Choshuenco")       → usar tal cual
+    #
+    # Ambos se normalizan a upper().strip() + colapso de espacios dobles,
+    # de modo que "DV04 Choshuenco" == "DV04 CHOSHUENCO" en la comparación.
+    # ─────────────────────────────────────────────────────────────────────
+
+    import re as _re_obra
+
+    # Cargar mapa ID_OBRA → OBRA desde la hoja OBRAS del Excel
+    try:
+        _df_obras_raw = pd.read_excel(
+            st.session_state.archivo_bytes
+            if isinstance(st.session_state.get("archivo_bytes"), (bytes, bytearray))
+            else open(
+                str(__import__("pathlib").Path(__file__).parent
+                    / "data" / "raw" / st.session_state.get("archivo_nombre","")),
+                "rb"
+            ).read()
+            if False else io.BytesIO(st.session_state["archivo_bytes"]),
+            sheet_name="OBRAS"
+        )
+        _df_obras_raw = _df_obras_raw.dropna(subset=["ID_OBRA","OBRA"])
+    except Exception:
+        _df_obras_raw = pd.DataFrame(columns=["ID_OBRA","OBRA"])
+
+    def _es_id_valido(x) -> bool:
+        """True si x parece un ID técnico: sin espacios, ≤10 chars, alfanumérico."""
+        if pd.isna(x): return False
+        s = str(x).strip()
+        return (len(s) <= 10
+                and " " not in s
+                and bool(_re_obra.match(r"^[a-zA-Z0-9]+$", s)))
+
+    # Mapa ID → nombre para IDs válidos solamente
+    _mapa_obras = {
+        str(r["ID_OBRA"]).strip(): str(r["OBRA"]).strip()
+        for _, r in _df_obras_raw.iterrows()
+        if _es_id_valido(r["ID_OBRA"]) and pd.notna(r["OBRA"])
+    }
+
+    def _norm_obra(texto) -> str:
+        """Normaliza nombre de obra: UPPER, strip, colapso de espacios."""
+        if pd.isna(texto) or not str(texto).strip():
+            return ""
+        return _re_obra.sub(r"\s+", " ", str(texto).strip().upper())
+
+    def _obra_de_recarga(obra_id) -> str:
+        """
+        Convierte OBRA_ID de recarga a nombre normalizado.
+        Si es ID válido y está en mapa → usa el nombre real.
+        Si es texto directo → normaliza directamente.
+        """
+        if pd.isna(obra_id): return ""
+        s = str(obra_id).strip()
+        if _es_id_valido(s) and s in _mapa_obras:
+            return _norm_obra(_mapa_obras[s])
+        return _norm_obra(s)
+
+    # Construir hist_comb con nombres normalizados
     _hist_comb: dict = {}
 
     if not _df_rep_hist.empty:
@@ -1172,9 +1234,11 @@ with tab_maq:
             subset=["OBRA_TXT"]
         ).groupby("ID_MAQUINA"):
             _hist_comb[_mid] = [
-                (row["FECHAHORA_INICIO"], str(row["OBRA_TXT"]).strip(), "REP")
+                (row["FECHAHORA_INICIO"],
+                 _norm_obra(row["OBRA_TXT"]),   # ← normalizado
+                 "REP")
                 for _, row in _grp[["FECHAHORA_INICIO","OBRA_TXT"]].iterrows()
-                if str(row["OBRA_TXT"]).strip()
+                if _norm_obra(row["OBRA_TXT"])
             ]
 
     if not _df_rec_hist.empty:
@@ -1185,8 +1249,8 @@ with tab_maq:
         ).groupby("ID_MAQUINA"):
             _evs = _hist_comb.get(_mid, [])
             for _, _row in _grp[["_f","OBRA_ID"]].iterrows():
-                _ob = str(_row["OBRA_ID"]).strip()
-                if _ob and _ob != "nan":
+                _ob = _obra_de_recarga(_row["OBRA_ID"])  # ← normalizado + mapeado
+                if _ob:
                     _evs.append((_row["_f"], _ob, "REC"))
             _hist_comb[_mid] = sorted(_evs, key=lambda x: x[0])
 
@@ -1679,11 +1743,11 @@ with tab_maq:
         },
     )
 
-    st.markdown("</div>", unsafe_allow_html=True)
-
     # ── Modal / tarjeta profesional de detalle ────────────────────────────
-    # Se activa al seleccionar una fila. Muestra toda la información
-    # en secciones visuales tipo SaaS, sin popups externos.
+    # CRÍTICO: Todo el HTML de la tarjeta se construye en Python como un
+    # único string y se pasa a UN SOLO st.markdown(). Si se usan múltiples
+    # st.markdown() anidados, Streamlit cierra cada div automáticamente y
+    # el HTML aparece como texto plano (el bug visible en la imagen).
     # ─────────────────────────────────────────────────────────────────────
     _filas_sel  = _evento_sel.selection.rows if _evento_sel else []
     _codigo_sel = None
@@ -1700,129 +1764,41 @@ with tab_maq:
         _lhr_m      = _fila_sel["L/hr"]
         _ub_m       = _fila_sel["Ubicación"]
         _dia_m      = _fila_sel["Días s/rep."]
-        _ind_m      = _fila_sel["🔔"]              # string de iconos
-        _mot_m      = _fila_sel.get("_motivo", "")
-        _det_m      = _fila_sel.get("_ind_det", {}) # dict de detalle
+        _ind_m      = str(_fila_sel["🔔"])
+        _det_m      = _fila_sel.get("_ind_det", {})
 
-        # Determinar color de estado para el header
+        # ── Colores según estado ───────────────────────────────────────────
         if "Activa" in str(_est_m):
-            _hdr_bg = "#065F46"; _badge_bg = "#D1FAE5"; _badge_cl = "#065F46"
-            _badge_txt = "ACTIVA"
+            _hdr_bg="#065F46"; _badge_bg="#D1FAE5"; _badge_cl="#065F46"; _badge_txt="ACTIVA"
         elif "Bajo" in str(_est_m):
-            _hdr_bg = "#92400E"; _badge_bg = "#FEF3C7"; _badge_cl = "#92400E"
-            _badge_txt = "BAJO REND."
+            _hdr_bg="#92400E"; _badge_bg="#FEF3C7"; _badge_cl="#92400E"; _badge_txt="BAJO REND."
         elif "Sin actividad" in str(_est_m):
-            _hdr_bg = "#7F1D1D"; _badge_bg = "#FEE2E2"; _badge_cl = "#B91C1C"
-            _badge_txt = "SIN ACTIVIDAD"
+            _hdr_bg="#7F1D1D"; _badge_bg="#FEE2E2"; _badge_cl="#B91C1C"; _badge_txt="SIN ACTIVIDAD"
         else:
-            _hdr_bg = "#374151"; _badge_bg = "#F3F4F6"; _badge_cl = "#374151"
-            _badge_txt = "SIN DATOS"
+            _hdr_bg="#374151"; _badge_bg="#F3F4F6"; _badge_cl="#374151"; _badge_txt="SIN DATOS"
 
-        # Último reporte formateado
-        _row_data = _tabla[_tabla["CODIGO_LIMPIO"] == _codigo_sel]
-        _id_m     = _row_data["ID_MAQUINA"].iloc[0] if not _row_data.empty else None
+        # ── Fechas de último reporte y recarga ────────────────────────────
+        _row_data    = _tabla[_tabla["CODIGO_LIMPIO"] == _codigo_sel]
+        _id_m        = _row_data["ID_MAQUINA"].iloc[0] if not _row_data.empty else None
         _ult_rep_fmt = "—"
         _ult_rec_fmt = "—"
         if pd.notna(_id_m) and _id_m in _ult:
-            _ult_dt = _ult[_id_m].get("_dt")
-            if pd.notna(_ult_dt):
-                _ult_rep_fmt = pd.Timestamp(_ult_dt).strftime("%d-%m-%Y")
+            _dt = _ult[_id_m].get("_dt")
+            if pd.notna(_dt):
+                _ult_rep_fmt = pd.Timestamp(_dt).strftime("%d-%m-%Y")
         if pd.notna(_id_m) and not _df_rec_hist.empty:
-            _recs = _df_rec_hist[_df_rec_hist["ID_MAQUINA"] == _id_m]
-            if not _recs.empty:
-                _ult_rec_dt = pd.to_datetime(_recs["FECHA"], errors="coerce").max()
-                if pd.notna(_ult_rec_dt):
-                    _ult_rec_fmt = pd.Timestamp(_ult_rec_dt).strftime("%d-%m-%Y")
+            _recs_m = _df_rec_hist[_df_rec_hist["ID_MAQUINA"] == _id_m]
+            if not _recs_m.empty:
+                _ult_rc = pd.to_datetime(_recs_m["FECHA"], errors="coerce").max()
+                if pd.notna(_ult_rc):
+                    _ult_rec_fmt = pd.Timestamp(_ult_rc).strftime("%d-%m-%Y")
 
-        # ── TARJETA MODAL ──────────────────────────────────────────────────
-        st.markdown(f"""
-        <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:14px;
-                    overflow:hidden;margin:10px 0;box-shadow:0 4px 16px rgba(0,0,0,.07)">
-
-          <!-- HEADER con color de estado -->
-          <div style="background:{_hdr_bg};padding:16px 20px;
-                      display:flex;justify-content:space-between;align-items:center">
-            <div>
-              <div style="font-size:18px;font-weight:800;color:#fff;letter-spacing:.01em">
-                {_codigo_sel} — {_fam_m}
-              </div>
-              <span style="display:inline-block;margin-top:5px;padding:3px 10px;
-                           background:{_badge_bg};color:{_badge_cl};border-radius:20px;
-                           font-size:11px;font-weight:700;letter-spacing:.06em">
-                {_badge_txt}
-              </span>
-            </div>
-            <div style="color:rgba(255,255,255,.6);font-size:12px;text-align:right">
-              Haz clic en otra fila para cambiar<br>
-              <span style="font-size:10px">Período: {fecha_ini.strftime('%d/%m/%Y')} → {fecha_fin.strftime('%d/%m/%Y')}</span>
-            </div>
-          </div>
-
-          <!-- BODY -->
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:0">
-
-            <!-- COL IZQUIERDA -->
-            <div style="padding:16px 20px;border-right:1px solid #E2E8F0">
-
-              <!-- ACTIVIDAD -->
-              <div style="font-size:11px;font-weight:700;letter-spacing:.07em;
-                          text-transform:uppercase;color:#94A3B8;margin-bottom:8px">
-                📡 Actividad
-              </div>
-              <table style="width:100%;font-size:13px;border-collapse:collapse">
-                <tr><td style="color:#64748B;padding:3px 0">Último reporte</td>
-                    <td style="font-weight:600;color:#0F172A;text-align:right">{_ult_rep_fmt}</td></tr>
-                <tr><td style="color:#64748B;padding:3px 0">Última recarga</td>
-                    <td style="font-weight:600;color:#0F172A;text-align:right">{_ult_rec_fmt}</td></tr>
-                <tr><td style="color:#64748B;padding:3px 0">Días sin reporte</td>
-                    <td style="font-weight:600;color:#0F172A;text-align:right">{_dia_m}</td></tr>
-                <tr><td style="color:#64748B;padding:3px 0">Último operador</td>
-                    <td style="font-weight:600;color:#0F172A;text-align:right;max-width:140px;
-                                word-break:break-word">{_op_m}</td></tr>
-                <tr><td style="color:#64748B;padding:3px 0">Ubicación</td>
-                    <td style="font-weight:600;color:#0F172A;text-align:right;max-width:140px;
-                                word-break:break-word">{_ub_m}</td></tr>
-              </table>
-
-              <!-- RENDIMIENTO PERÍODO -->
-              <div style="margin-top:14px;font-size:11px;font-weight:700;letter-spacing:.07em;
-                          text-transform:uppercase;color:#94A3B8;margin-bottom:8px">
-                ⏱ Rendimiento período
-              </div>
-              <div style="display:flex;gap:10px">
-                <div style="flex:1;background:#EFF6FF;border-radius:8px;padding:10px;text-align:center">
-                  <div style="font-size:18px;font-weight:800;color:#1E40AF">{_hrs_m}</div>
-                  <div style="font-size:10px;color:#64748B;margin-top:2px">Horas</div>
-                </div>
-                <div style="flex:1;background:#FFFBEB;border-radius:8px;padding:10px;text-align:center">
-                  <div style="font-size:18px;font-weight:800;color:#92400E">{_lit_m}</div>
-                  <div style="font-size:10px;color:#64748B;margin-top:2px">Litros</div>
-                </div>
-                <div style="flex:1;background:#F0FDF4;border-radius:8px;padding:10px;text-align:center">
-                  <div style="font-size:18px;font-weight:800;color:#065F46">{_lhr_m}</div>
-                  <div style="font-size:10px;color:#64748B;margin-top:2px">L/hr</div>
-                </div>
-              </div>
-
-            </div>
-
-            <!-- COL DERECHA — INDICADORES -->
-            <div style="padding:16px 20px">
-              <div style="font-size:11px;font-weight:700;letter-spacing:.07em;
-                          text-transform:uppercase;color:#94A3B8;margin-bottom:10px">
-                🚨 Indicadores
-              </div>
-
-              {"<!-- SIN INDICADORES --><div style='color:#64748B;font-size:13px;padding:20px 0;text-align:center'>Sin indicadores activos ✓</div>" if not _ind_m else ""}
-
-        """, unsafe_allow_html=True)
-
-        # ── Renderizar cada indicador activo ──────────────────────────────
+        # ── Construir HTML de indicadores (en Python, no con st.markdown) ─
+        _ind_html = ""
         if isinstance(_det_m, dict):
 
-            # 🔔 Cambio de obra
             if "cambio_obra" in _det_m:
-                st.markdown(f"""
+                _ind_html += f"""
                 <div style="background:#FEF2F2;border-left:3px solid #EF4444;
                             border-radius:0 8px 8px 0;padding:10px 14px;margin-bottom:8px">
                   <div style="font-size:12px;font-weight:700;color:#B91C1C;margin-bottom:3px">
@@ -1831,12 +1807,10 @@ with tab_maq:
                   <div style="font-size:12px;color:#7F1D1D;line-height:1.5">
                     {_det_m['cambio_obra']}
                   </div>
-                </div>
-                """, unsafe_allow_html=True)
+                </div>"""
 
-            # 💤 Inactividad
             if "inactividad" in _det_m:
-                st.markdown(f"""
+                _ind_html += f"""
                 <div style="background:#F1F5F9;border-left:3px solid #94A3B8;
                             border-radius:0 8px 8px 0;padding:10px 14px;margin-bottom:8px">
                   <div style="font-size:12px;font-weight:700;color:#475569;margin-bottom:3px">
@@ -1845,54 +1819,170 @@ with tab_maq:
                   <div style="font-size:12px;color:#64748B">
                     {_det_m['inactividad']}
                   </div>
-                </div>
-                """, unsafe_allow_html=True)
+                </div>"""
 
-            # 📊 Análisis de uso
             if "uso" in _det_m:
-                _u  = _det_m["uso"]
-                _ci = _u["concl"][0]
-                _ct = _u["concl"][1]
-                _concl_color = {
-                    "✔": "#065F46", "⚠": "#92400E", "❌": "#B91C1C"
-                }.get(_ci, "#374151")
-                _concl_bg = {
-                    "✔": "#D1FAE5", "⚠": "#FEF3C7", "❌": "#FEE2E2"
-                }.get(_ci, "#F3F4F6")
-                _clf_color = {
-                    "Óptimo": "#065F46", "Normal": "#1E40AF",
-                    "Bajo": "#92400E", "Irregular": "#B91C1C", "Sin uso": "#475569"
-                }.get(_u["clasif"], "#374151")
-
-                st.markdown(f"""
+                _u   = _det_m["uso"]
+                _ci  = _u["concl"][0]
+                _ct  = _u["concl"][1]
+                _cc  = {"✔":"#065F46","⚠":"#92400E","❌":"#B91C1C"}.get(_ci,"#374151")
+                _cb  = {"✔":"#D1FAE5","⚠":"#FEF3C7","❌":"#FEE2E2"}.get(_ci,"#F3F4F6")
+                _cfc = {"Óptimo":"#065F46","Normal":"#1E40AF",
+                        "Bajo":"#92400E","Irregular":"#B91C1C"}.get(_u["clasif"],"#374151")
+                _ind_html += f"""
                 <div style="background:#F0F9FF;border-left:3px solid #38BDF8;
                             border-radius:0 8px 8px 0;padding:10px 14px;margin-bottom:8px">
                   <div style="font-size:12px;font-weight:700;color:#0369A1;margin-bottom:6px">
                     📊 Uso / Eficiencia — últimos 30 días
                   </div>
-                  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px">
-                    <span style="background:#E0F2FE;color:#0369A1;padding:2px 8px;
+                  <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px">
+                    <span style="background:#E0F2FE;color:#0369A1;padding:2px 9px;
                                  border-radius:12px;font-size:11px;font-weight:600">
-                      Promedio: {_u['prom']} h/día
+                      {_u['prom']} h/día
                     </span>
-                    <span style="background:#E0F2FE;color:#0369A1;padding:2px 8px;
+                    <span style="background:#E0F2FE;color:#0369A1;padding:2px 9px;
                                  border-radius:12px;font-size:11px;font-weight:600">
-                      Variación: {_u['variacion']}
+                      Var. {_u['variacion']}
                     </span>
-                    <span style="background:#E0F2FE;color:{_clf_color};padding:2px 8px;
+                    <span style="background:#E0F2FE;color:{_cfc};padding:2px 9px;
                                  border-radius:12px;font-size:11px;font-weight:600">
                       {_u['clasif']}
                     </span>
                   </div>
-                  <div style="background:{_concl_bg};color:{_concl_color};
-                              padding:5px 10px;border-radius:6px;font-size:12px;font-weight:600">
+                  <div style="background:{_cb};color:{_cc};
+                              padding:5px 10px;border-radius:6px;
+                              font-size:12px;font-weight:600">
                     {_ci} {_ct}
                   </div>
-                </div>
-                """, unsafe_allow_html=True)
+                </div>"""
 
-        # Cerrar tarjeta
-        st.markdown("</div></div></div>", unsafe_allow_html=True)
+        if not _ind_html:
+            _ind_html = """
+            <div style="text-align:center;padding:28px 0;color:#94A3B8;font-size:13px">
+              ✓ Sin indicadores activos
+            </div>"""
+
+        # ── Renderizar TODA la tarjeta en un solo st.markdown() ───────────
+        st.markdown(f"""
+        <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:14px;
+                    overflow:hidden;margin:12px 0 6px;
+                    box-shadow:0 4px 20px rgba(0,0,0,.08)">
+
+          <!-- HEADER -->
+          <div style="background:{_hdr_bg};padding:16px 20px 14px;
+                      display:flex;justify-content:space-between;align-items:flex-start">
+            <div>
+              <div style="font-size:17px;font-weight:800;color:#fff;
+                          letter-spacing:.01em;line-height:1.2;margin-bottom:7px">
+                {_codigo_sel} — {_fam_m}
+              </div>
+              <span style="display:inline-block;padding:3px 11px;
+                           background:{_badge_bg};color:{_badge_cl};
+                           border-radius:20px;font-size:10.5px;font-weight:700;
+                           letter-spacing:.06em">
+                {_badge_txt}
+              </span>
+            </div>
+            <div style="color:rgba(255,255,255,.55);font-size:11px;text-align:right;
+                        margin-top:2px;line-height:1.6">
+              Período analizado<br>
+              <span style="color:rgba(255,255,255,.8);font-weight:600">
+                {fecha_ini.strftime('%d/%m/%Y')} → {fecha_fin.strftime('%d/%m/%Y')}
+              </span>
+            </div>
+          </div>
+
+          <!-- BODY: 2 columnas -->
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:0">
+
+            <!-- COLUMNA IZQUIERDA: actividad + rendimiento -->
+            <div style="padding:18px 20px;border-right:1px solid #E2E8F0">
+
+              <!-- Actividad -->
+              <div style="font-size:10.5px;font-weight:700;letter-spacing:.08em;
+                          text-transform:uppercase;color:#94A3B8;margin-bottom:10px">
+                📡 Actividad
+              </div>
+              <table style="width:100%;font-size:12.5px;border-collapse:collapse;
+                            margin-bottom:16px">
+                <tr>
+                  <td style="color:#64748B;padding:4px 0;width:50%">Último reporte</td>
+                  <td style="font-weight:600;color:#0F172A;text-align:right">
+                    {_ult_rep_fmt}
+                  </td>
+                </tr>
+                <tr>
+                  <td style="color:#64748B;padding:4px 0">Última recarga</td>
+                  <td style="font-weight:600;color:#0F172A;text-align:right">
+                    {_ult_rec_fmt}
+                  </td>
+                </tr>
+                <tr>
+                  <td style="color:#64748B;padding:4px 0">Días sin reporte</td>
+                  <td style="font-weight:600;color:#0F172A;text-align:right">
+                    {_dia_m}
+                  </td>
+                </tr>
+                <tr>
+                  <td style="color:#64748B;padding:4px 0">Operador</td>
+                  <td style="font-weight:600;color:#0F172A;text-align:right;
+                              max-width:150px;word-break:break-word">
+                    {_op_m}
+                  </td>
+                </tr>
+                <tr>
+                  <td style="color:#64748B;padding:4px 0">Ubicación</td>
+                  <td style="font-weight:600;color:#0F172A;text-align:right;
+                              max-width:150px;word-break:break-word;font-size:11.5px">
+                    {_ub_m}
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Rendimiento período -->
+              <div style="font-size:10.5px;font-weight:700;letter-spacing:.08em;
+                          text-transform:uppercase;color:#94A3B8;margin-bottom:10px">
+                ⏱ Rendimiento período
+              </div>
+              <div style="display:flex;gap:8px">
+                <div style="flex:1;background:#EFF6FF;border-radius:10px;
+                            padding:11px 8px;text-align:center">
+                  <div style="font-size:17px;font-weight:800;color:#1E40AF;
+                              line-height:1">{_hrs_m}</div>
+                  <div style="font-size:9.5px;color:#64748B;margin-top:4px;
+                              letter-spacing:.04em">HORAS</div>
+                </div>
+                <div style="flex:1;background:#FFFBEB;border-radius:10px;
+                            padding:11px 8px;text-align:center">
+                  <div style="font-size:17px;font-weight:800;color:#92400E;
+                              line-height:1">{_lit_m}</div>
+                  <div style="font-size:9.5px;color:#64748B;margin-top:4px;
+                              letter-spacing:.04em">LITROS</div>
+                </div>
+                <div style="flex:1;background:#F0FDF4;border-radius:10px;
+                            padding:11px 8px;text-align:center">
+                  <div style="font-size:17px;font-weight:800;color:#065F46;
+                              line-height:1">{_lhr_m}</div>
+                  <div style="font-size:9.5px;color:#64748B;margin-top:4px;
+                              letter-spacing:.04em">L/HR</div>
+                </div>
+              </div>
+
+            </div>
+
+            <!-- COLUMNA DERECHA: indicadores -->
+            <div style="padding:18px 20px">
+              <div style="font-size:10.5px;font-weight:700;letter-spacing:.08em;
+                          text-transform:uppercase;color:#94A3B8;margin-bottom:10px">
+                🚨 Indicadores
+              </div>
+              {_ind_html}
+            </div>
+
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
 
     # ────────────────────────────────────────────────────────────────────────
     # BLOQUE L — EXPORTACIONES
