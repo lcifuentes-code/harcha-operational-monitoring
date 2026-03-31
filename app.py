@@ -1360,6 +1360,119 @@ with tab_maq:
                   else None
     )
 
+    # G6. generar_indicadores(maquina) — sistema combinado de iconos
+    # ────────────────────────────────────────────────────────────────
+    # Retorna:
+    #   iconos_str   : string con iconos concatenados, ej: "🔔 💤 📊"
+    #   detalle_dict : dict con detalle por indicador
+    #
+    # Tipos:
+    #   🔔 Cambio de obra   — ya calculado en _cambio_res
+    #   💤 Inactividad      — sin actividad en > N días (configurable)
+    #   📊 Análisis de uso  — solo informativo, NO es alarma
+    # ────────────────────────────────────────────────────────────────
+
+    # Umbral configurable de inactividad (días)
+    _UMBRAL_INACT = 7
+
+    # Pre-calcular eficiencia por máquina con historial completo de reportes
+    # (últimos 30 días desde fecha_fin para análisis de uso)
+    _corte_30d = _ref_ts - pd.Timedelta(days=30)
+    _efic_map: dict = {}
+
+    if not _df_rep_hist.empty:
+        _rep_30d = _df_rep_hist[
+            _df_rep_hist["FECHAHORA_INICIO"] >= _corte_30d
+        ].copy()
+        if not _rep_30d.empty:
+            _rep_30d["_dia"] = _rep_30d["FECHAHORA_INICIO"].dt.date
+            for _mid_e, _grp_e in _rep_30d.groupby("ID_MAQUINA"):
+                _hrs_por_dia = _grp_e.groupby("_dia")["HORAS_TRABAJADAS"].sum()
+                _hrs_list    = [h for h in _hrs_por_dia.values if h > 0]
+                if not _hrs_list:
+                    continue
+                import statistics as _stat
+                _prom   = round(sum(_hrs_list) / len(_hrs_list), 1)
+                _desv   = round(_stat.stdev([float(h) for h in _hrs_list]), 1) if len(_hrs_list) > 1 else 0
+                _cv     = (_desv / _prom) if _prom > 0 else 0   # coef. variación
+
+                # Clasificación
+                if _prom >= 8:
+                    _clf = "Óptimo"
+                elif _prom >= 5:
+                    _clf = "Normal"
+                elif _prom >= 2:
+                    _clf = "Bajo"
+                else:
+                    _clf = "Irregular"
+
+                if _cv > 0.5:
+                    _var = "Alta"
+                elif _cv > 0.25:
+                    _var = "Media"
+                else:
+                    _var = "Baja"
+
+                # Conclusión automática
+                if _clf == "Óptimo" and _var in ("Baja","Media"):
+                    _concl = ("✔", "Bien aprovechada")
+                elif _clf in ("Bajo","Irregular") or _cv > 0.5:
+                    _concl = ("⚠", "Revisar uso")
+                else:
+                    _concl = ("✔", "Uso normal")
+
+                _efic_map[_mid_e] = {
+                    "prom":       _prom,
+                    "desv":       _desv,
+                    "variacion":  _var,
+                    "clasif":     _clf,
+                    "dias_datos": len(_hrs_list),
+                    "concl":      _concl,
+                }
+
+    def _generar_indicadores(row) -> tuple:
+        """
+        Combina todos los indicadores de una máquina.
+        Retorna (iconos_str, detalle_dict).
+        iconos_str: "🔔 💤 📊" o subconjunto, o "" si no hay nada.
+        """
+        mid      = row["ID_MAQUINA"]
+        familia  = row["FAMILIA"]
+        iconos   = []
+        detalle  = {}
+
+        # ── 🔔 Cambio de obra (ya calculado) ─────────────────────────────
+        if row["alarma"] == "🔔":
+            iconos.append("🔔")
+            detalle["cambio_obra"] = row["motivo"]
+
+        # ── 💤 Inactividad ────────────────────────────────────────────────
+        # Una máquina activa en el catálogo que lleva > _UMBRAL_INACT días
+        # sin ninguna actividad (reporte ni recarga)
+        if pd.notna(mid):
+            _dias_inact = row["dias_sr"]
+            _en_prod    = str(row.get("ESTADO","")).strip() in ESTADOS_ACTIVOS
+            if _en_prod and pd.notna(_dias_inact) and int(_dias_inact) > _UMBRAL_INACT:
+                iconos.append("💤")
+                detalle["inactividad"] = (
+                    f"Sin actividad en los últimos {int(_dias_inact)} días"
+                )
+
+        # ── 📊 Análisis de uso ────────────────────────────────────────────
+        # Solo para maquinaria que tiene datos de historial suficientes
+        if pd.notna(mid) and mid in _efic_map:
+            _e = _efic_map[mid]
+            # Mostrar 📊 solo si hay al menos 5 días de datos
+            if _e["dias_datos"] >= 5:
+                iconos.append("📊")
+                detalle["uso"] = _e
+
+        return (" ".join(iconos), detalle)
+
+    _ind_res = _tabla.apply(_generar_indicadores, axis=1)
+    _tabla["indicadores"]      = _ind_res.apply(lambda x: x[0])
+    _tabla["indicadores_det"]  = _ind_res.apply(lambda x: x[1])
+
     # ────────────────────────────────────────────────────────────────────────
     # BLOQUE H — KPIs
     # ────────────────────────────────────────────────────────────────────────
@@ -1435,7 +1548,7 @@ with tab_maq:
     _df_f = _tabla.copy()
     if _fam_sel   != "Todas": _df_f = _df_f[_df_f["FAMILIA"]    == _fam_sel]
     if _est_sel   != "Todos": _df_f = _df_f[_df_f["estado_op"] == _est_sel]
-    if _solo_alarm:           _df_f = _df_f[_df_f["alarma"]    == "🔔"]
+    if _solo_alarm:           _df_f = _df_f[_df_f["indicadores"].str.contains("🔔", na=False)]
     if _q.strip():
         _qn = _q.strip().lower()
         _mask = (
@@ -1464,30 +1577,32 @@ with tab_maq:
 
     _df_v = _df_f[[
         "#","CODIGO_LIMPIO","FAMILIA","estado_op","ult_op",
-        "horas","litros","l_hr","ubicacion","alarma","motivo","dias_sr"
+        "horas","litros","l_hr","ubicacion","indicadores","motivo",
+        "indicadores_det","dias_sr"
     ]].copy()
 
-    _df_v["estado_op"] = _df_v["estado_op"].map(_EST_EMOJI).fillna(_df_v["estado_op"])
-    _df_v["horas"]     = _df_v["horas"].apply(lambda x: _fmt(x, 1))
-    _df_v["litros"]    = _df_v["litros"].apply(lambda x: _fmt(x, 0))
-    _df_v["l_hr"]      = _df_v["l_hr"].apply(lambda x: _fmt(x, 2))
-    _df_v["dias_sr"]   = _df_v["dias_sr"].apply(
+    _df_v["estado_op"]   = _df_v["estado_op"].map(_EST_EMOJI).fillna(_df_v["estado_op"])
+    _df_v["horas"]       = _df_v["horas"].apply(lambda x: _fmt(x, 1))
+    _df_v["litros"]      = _df_v["litros"].apply(lambda x: _fmt(x, 0))
+    _df_v["l_hr"]        = _df_v["l_hr"].apply(lambda x: _fmt(x, 2))
+    _df_v["dias_sr"]     = _df_v["dias_sr"].apply(
         lambda x: f"{int(x)} d" if pd.notna(x) else "—"
     )
 
     _df_v = _df_v.rename(columns={
-        "#":            "#",
-        "CODIGO_LIMPIO":"Código",
-        "FAMILIA":      "Familia",
-        "estado_op":    "Estado",
-        "ult_op":       "Último operador",
-        "horas":        "Horas",
-        "litros":       "Litros",
-        "l_hr":         "L/hr",
-        "ubicacion":    "Ubicación",
-        "alarma":       "🔔",
-        "motivo":       "Motivo alarma",
-        "dias_sr":      "Días s/rep.",
+        "#":               "#",
+        "CODIGO_LIMPIO":   "Código",
+        "FAMILIA":         "Familia",
+        "estado_op":       "Estado",
+        "ult_op":          "Último operador",
+        "horas":           "Horas",
+        "litros":          "Litros",
+        "l_hr":            "L/hr",
+        "ubicacion":       "Ubicación",
+        "indicadores":     "🔔",          # misma columna, ahora con iconos combinados
+        "motivo":          "_motivo",      # oculto — usado en modal
+        "indicadores_det": "_ind_det",     # oculto — usado en modal
+        "dias_sr":         "Días s/rep.",
     })
 
     # ────────────────────────────────────────────────────────────────────────
@@ -1550,10 +1665,11 @@ with tab_maq:
             "🔔": st.column_config.TextColumn(
                 "🔔", width="small",
                 help=(
-                    "🔔 = cambio de obra detectado.\n"
-                    "Haz clic en la fila para ver el detalle.\n"
-                    "Aplica a Camión Tolva, Excavadora, Retroexcavadora,\n"
-                    "Motoniveladora, Bulldozer y otros equipos operacionales."
+                    "🔔 Cambio de obra detectado\n"
+                    "💤 Sin actividad reciente (> 7 días)\n"
+                    "📊 Análisis de uso disponible\n"
+                    "──\n"
+                    "Haz clic en la fila para ver el detalle completo."
                 ),
             ),
             "Días s/rep.": st.column_config.TextColumn(
@@ -1565,140 +1681,325 @@ with tab_maq:
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # ── Panel de detalle de fila seleccionada ─────────────────────────────
-    _filas_sel = _evento_sel.selection.rows if _evento_sel else []
-    _codigo_sel = None   # usado luego en la exportación por máquina
+    # ── Modal / tarjeta profesional de detalle ────────────────────────────
+    # Se activa al seleccionar una fila. Muestra toda la información
+    # en secciones visuales tipo SaaS, sin popups externos.
+    # ─────────────────────────────────────────────────────────────────────
+    _filas_sel  = _evento_sel.selection.rows if _evento_sel else []
+    _codigo_sel = None
 
     if _filas_sel:
-        _idx_sel  = _filas_sel[0]
-        _fila_sel = _df_v.iloc[_idx_sel]
-        _codigo_sel  = _fila_sel["Código"]
-        _familia_sel = _fila_sel["Familia"]
-        _alarma_sel  = _fila_sel["🔔"]
-        _motivo_sel  = _fila_sel.get("Motivo alarma", "")
-        _est_sel_    = _fila_sel["Estado"]
-        _op_sel      = _fila_sel["Último operador"]
-        _hrs_sel     = _fila_sel["Horas"]
-        _lit_sel     = _fila_sel["Litros"]
-        _dia_sel     = _fila_sel["Días s/rep."]
+        _idx_sel    = _filas_sel[0]
+        _fila_sel   = _df_v.iloc[_idx_sel]
+        _codigo_sel = _fila_sel["Código"]
+        _fam_m      = _fila_sel["Familia"]
+        _est_m      = _fila_sel["Estado"]
+        _op_m       = _fila_sel["Último operador"]
+        _hrs_m      = _fila_sel["Horas"]
+        _lit_m      = _fila_sel["Litros"]
+        _lhr_m      = _fila_sel["L/hr"]
+        _ub_m       = _fila_sel["Ubicación"]
+        _dia_m      = _fila_sel["Días s/rep."]
+        _ind_m      = _fila_sel["🔔"]              # string de iconos
+        _mot_m      = _fila_sel.get("_motivo", "")
+        _det_m      = _fila_sel.get("_ind_det", {}) # dict de detalle
 
-        with st.container():
-            if _alarma_sel == "🔔" and _motivo_sel:
+        # Determinar color de estado para el header
+        if "Activa" in str(_est_m):
+            _hdr_bg = "#065F46"; _badge_bg = "#D1FAE5"; _badge_cl = "#065F46"
+            _badge_txt = "ACTIVA"
+        elif "Bajo" in str(_est_m):
+            _hdr_bg = "#92400E"; _badge_bg = "#FEF3C7"; _badge_cl = "#92400E"
+            _badge_txt = "BAJO REND."
+        elif "Sin actividad" in str(_est_m):
+            _hdr_bg = "#7F1D1D"; _badge_bg = "#FEE2E2"; _badge_cl = "#B91C1C"
+            _badge_txt = "SIN ACTIVIDAD"
+        else:
+            _hdr_bg = "#374151"; _badge_bg = "#F3F4F6"; _badge_cl = "#374151"
+            _badge_txt = "SIN DATOS"
+
+        # Último reporte formateado
+        _row_data = _tabla[_tabla["CODIGO_LIMPIO"] == _codigo_sel]
+        _id_m     = _row_data["ID_MAQUINA"].iloc[0] if not _row_data.empty else None
+        _ult_rep_fmt = "—"
+        _ult_rec_fmt = "—"
+        if pd.notna(_id_m) and _id_m in _ult:
+            _ult_dt = _ult[_id_m].get("_dt")
+            if pd.notna(_ult_dt):
+                _ult_rep_fmt = pd.Timestamp(_ult_dt).strftime("%d-%m-%Y")
+        if pd.notna(_id_m) and not _df_rec_hist.empty:
+            _recs = _df_rec_hist[_df_rec_hist["ID_MAQUINA"] == _id_m]
+            if not _recs.empty:
+                _ult_rec_dt = pd.to_datetime(_recs["FECHA"], errors="coerce").max()
+                if pd.notna(_ult_rec_dt):
+                    _ult_rec_fmt = pd.Timestamp(_ult_rec_dt).strftime("%d-%m-%Y")
+
+        # ── TARJETA MODAL ──────────────────────────────────────────────────
+        st.markdown(f"""
+        <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:14px;
+                    overflow:hidden;margin:10px 0;box-shadow:0 4px 16px rgba(0,0,0,.07)">
+
+          <!-- HEADER con color de estado -->
+          <div style="background:{_hdr_bg};padding:16px 20px;
+                      display:flex;justify-content:space-between;align-items:center">
+            <div>
+              <div style="font-size:18px;font-weight:800;color:#fff;letter-spacing:.01em">
+                {_codigo_sel} — {_fam_m}
+              </div>
+              <span style="display:inline-block;margin-top:5px;padding:3px 10px;
+                           background:{_badge_bg};color:{_badge_cl};border-radius:20px;
+                           font-size:11px;font-weight:700;letter-spacing:.06em">
+                {_badge_txt}
+              </span>
+            </div>
+            <div style="color:rgba(255,255,255,.6);font-size:12px;text-align:right">
+              Haz clic en otra fila para cambiar<br>
+              <span style="font-size:10px">Período: {fecha_ini.strftime('%d/%m/%Y')} → {fecha_fin.strftime('%d/%m/%Y')}</span>
+            </div>
+          </div>
+
+          <!-- BODY -->
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:0">
+
+            <!-- COL IZQUIERDA -->
+            <div style="padding:16px 20px;border-right:1px solid #E2E8F0">
+
+              <!-- ACTIVIDAD -->
+              <div style="font-size:11px;font-weight:700;letter-spacing:.07em;
+                          text-transform:uppercase;color:#94A3B8;margin-bottom:8px">
+                📡 Actividad
+              </div>
+              <table style="width:100%;font-size:13px;border-collapse:collapse">
+                <tr><td style="color:#64748B;padding:3px 0">Último reporte</td>
+                    <td style="font-weight:600;color:#0F172A;text-align:right">{_ult_rep_fmt}</td></tr>
+                <tr><td style="color:#64748B;padding:3px 0">Última recarga</td>
+                    <td style="font-weight:600;color:#0F172A;text-align:right">{_ult_rec_fmt}</td></tr>
+                <tr><td style="color:#64748B;padding:3px 0">Días sin reporte</td>
+                    <td style="font-weight:600;color:#0F172A;text-align:right">{_dia_m}</td></tr>
+                <tr><td style="color:#64748B;padding:3px 0">Último operador</td>
+                    <td style="font-weight:600;color:#0F172A;text-align:right;max-width:140px;
+                                word-break:break-word">{_op_m}</td></tr>
+                <tr><td style="color:#64748B;padding:3px 0">Ubicación</td>
+                    <td style="font-weight:600;color:#0F172A;text-align:right;max-width:140px;
+                                word-break:break-word">{_ub_m}</td></tr>
+              </table>
+
+              <!-- RENDIMIENTO PERÍODO -->
+              <div style="margin-top:14px;font-size:11px;font-weight:700;letter-spacing:.07em;
+                          text-transform:uppercase;color:#94A3B8;margin-bottom:8px">
+                ⏱ Rendimiento período
+              </div>
+              <div style="display:flex;gap:10px">
+                <div style="flex:1;background:#EFF6FF;border-radius:8px;padding:10px;text-align:center">
+                  <div style="font-size:18px;font-weight:800;color:#1E40AF">{_hrs_m}</div>
+                  <div style="font-size:10px;color:#64748B;margin-top:2px">Horas</div>
+                </div>
+                <div style="flex:1;background:#FFFBEB;border-radius:8px;padding:10px;text-align:center">
+                  <div style="font-size:18px;font-weight:800;color:#92400E">{_lit_m}</div>
+                  <div style="font-size:10px;color:#64748B;margin-top:2px">Litros</div>
+                </div>
+                <div style="flex:1;background:#F0FDF4;border-radius:8px;padding:10px;text-align:center">
+                  <div style="font-size:18px;font-weight:800;color:#065F46">{_lhr_m}</div>
+                  <div style="font-size:10px;color:#64748B;margin-top:2px">L/hr</div>
+                </div>
+              </div>
+
+            </div>
+
+            <!-- COL DERECHA — INDICADORES -->
+            <div style="padding:16px 20px">
+              <div style="font-size:11px;font-weight:700;letter-spacing:.07em;
+                          text-transform:uppercase;color:#94A3B8;margin-bottom:10px">
+                🚨 Indicadores
+              </div>
+
+              {"<!-- SIN INDICADORES --><div style='color:#64748B;font-size:13px;padding:20px 0;text-align:center'>Sin indicadores activos ✓</div>" if not _ind_m else ""}
+
+        """, unsafe_allow_html=True)
+
+        # ── Renderizar cada indicador activo ──────────────────────────────
+        if isinstance(_det_m, dict):
+
+            # 🔔 Cambio de obra
+            if "cambio_obra" in _det_m:
                 st.markdown(f"""
-                <div style="background:#FEF2F2;border:1px solid #FCA5A5;
-                            border-left:4px solid #EF4444;border-radius:8px;
-                            padding:12px 16px;margin:8px 0">
-                    <div style="font-size:13px;font-weight:700;color:#B91C1C;
-                                margin-bottom:4px">
-                        🔔 {_codigo_sel} — Cambio de obra detectado
-                    </div>
-                    <div style="font-size:12px;color:#7F1D1D">{_motivo_sel}</div>
-                    <div style="font-size:11px;color:#9CA3AF;margin-top:4px">
-                        {_familia_sel} · {_est_sel_} · Op: {_op_sel}
-                        · Horas: {_hrs_sel} · Litros: {_lit_sel}
-                        · Sin reporte: {_dia_sel}
-                    </div>
+                <div style="background:#FEF2F2;border-left:3px solid #EF4444;
+                            border-radius:0 8px 8px 0;padding:10px 14px;margin-bottom:8px">
+                  <div style="font-size:12px;font-weight:700;color:#B91C1C;margin-bottom:3px">
+                    🔔 Cambio de obra
+                  </div>
+                  <div style="font-size:12px;color:#7F1D1D;line-height:1.5">
+                    {_det_m['cambio_obra']}
+                  </div>
                 </div>
                 """, unsafe_allow_html=True)
-            else:
+
+            # 💤 Inactividad
+            if "inactividad" in _det_m:
                 st.markdown(f"""
-                <div style="background:#EFF6FF;border:1px solid #BFDBFE;
-                            border-left:4px solid #3B82F6;border-radius:8px;
-                            padding:12px 16px;margin:8px 0">
-                    <div style="font-size:13px;font-weight:700;color:#1E40AF;
-                                margin-bottom:4px">
-                        📋 {_codigo_sel} — {_familia_sel}
-                    </div>
-                    <div style="font-size:12px;color:#1E3A8A">
-                        {_est_sel_} · Operador: {_op_sel}
-                        · Horas: {_hrs_sel} · Litros: {_lit_sel}
-                        · Sin reporte: {_dia_sel}
-                    </div>
+                <div style="background:#F1F5F9;border-left:3px solid #94A3B8;
+                            border-radius:0 8px 8px 0;padding:10px 14px;margin-bottom:8px">
+                  <div style="font-size:12px;font-weight:700;color:#475569;margin-bottom:3px">
+                    💤 Inactividad
+                  </div>
+                  <div style="font-size:12px;color:#64748B">
+                    {_det_m['inactividad']}
+                  </div>
                 </div>
                 """, unsafe_allow_html=True)
+
+            # 📊 Análisis de uso
+            if "uso" in _det_m:
+                _u  = _det_m["uso"]
+                _ci = _u["concl"][0]
+                _ct = _u["concl"][1]
+                _concl_color = {
+                    "✔": "#065F46", "⚠": "#92400E", "❌": "#B91C1C"
+                }.get(_ci, "#374151")
+                _concl_bg = {
+                    "✔": "#D1FAE5", "⚠": "#FEF3C7", "❌": "#FEE2E2"
+                }.get(_ci, "#F3F4F6")
+                _clf_color = {
+                    "Óptimo": "#065F46", "Normal": "#1E40AF",
+                    "Bajo": "#92400E", "Irregular": "#B91C1C", "Sin uso": "#475569"
+                }.get(_u["clasif"], "#374151")
+
+                st.markdown(f"""
+                <div style="background:#F0F9FF;border-left:3px solid #38BDF8;
+                            border-radius:0 8px 8px 0;padding:10px 14px;margin-bottom:8px">
+                  <div style="font-size:12px;font-weight:700;color:#0369A1;margin-bottom:6px">
+                    📊 Uso / Eficiencia — últimos 30 días
+                  </div>
+                  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px">
+                    <span style="background:#E0F2FE;color:#0369A1;padding:2px 8px;
+                                 border-radius:12px;font-size:11px;font-weight:600">
+                      Promedio: {_u['prom']} h/día
+                    </span>
+                    <span style="background:#E0F2FE;color:#0369A1;padding:2px 8px;
+                                 border-radius:12px;font-size:11px;font-weight:600">
+                      Variación: {_u['variacion']}
+                    </span>
+                    <span style="background:#E0F2FE;color:{_clf_color};padding:2px 8px;
+                                 border-radius:12px;font-size:11px;font-weight:600">
+                      {_u['clasif']}
+                    </span>
+                  </div>
+                  <div style="background:{_concl_bg};color:{_concl_color};
+                              padding:5px 10px;border-radius:6px;font-size:12px;font-weight:600">
+                    {_ci} {_ct}
+                  </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+        # Cerrar tarjeta
+        st.markdown("</div></div></div>", unsafe_allow_html=True)
 
     # ────────────────────────────────────────────────────────────────────────
     # BLOQUE L — EXPORTACIONES
     # ────────────────────────────────────────────────────────────────────────
-    # A. Exportación general (tabla visible → CSV o Excel)
-    # B. Exportación por máquina (multi-hoja Excel con historial completo)
-    # ────────────────────────────────────────────────────────────────────────
 
     import io as _io_exp
     import openpyxl as _opxl
-    from openpyxl.styles import Font as _Font, PatternFill as _PFill, Alignment as _Align
+    from openpyxl.styles import (Font as _Font, PatternFill as _PFill,
+                                  Alignment as _Align, Border as _Border,
+                                  Side as _Side)
 
-    # ── Función helper: DataFrame → hoja de Excel con cabecera estilizada ──
-    def _df_a_hoja(ws, df, titulo_col=None):
-        """Escribe df en ws de openpyxl. Cabecera en negrita con fondo gris."""
-        if titulo_col:
-            ws.append([titulo_col])
-            ws.cell(1, 1).font = _Font(bold=True, size=12)
+    # ── Helper: escribir DataFrame en hoja con estilos profesionales ────────
+    def _df_a_hoja(ws, df, subtitulo=None):
+        """DataFrame → hoja openpyxl con cabecera azul, filas alternas y bordes."""
+        # Subtítulo opcional
+        if subtitulo:
+            ws.append([subtitulo])
+            ws.cell(ws.max_row, 1).font = _Font(bold=True, size=11, color="1E40AF")
             ws.append([])
 
         # Cabecera
-        headers = list(df.columns)
-        ws.append(headers)
-        hdr_row = ws.max_row
-        for col_i, _ in enumerate(headers, 1):
-            cell = ws.cell(hdr_row, col_i)
-            cell.font = _Font(bold=True, color="FFFFFF")
-            cell.fill = _PFill("solid", fgColor="1E40AF")
-            cell.alignment = _Align(horizontal="center")
+        ws.append(list(df.columns))
+        _hr = ws.max_row
+        for _ci, _ in enumerate(df.columns, 1):
+            _c = ws.cell(_hr, _ci)
+            _c.font      = _Font(bold=True, color="FFFFFF", size=10)
+            _c.fill      = _PFill("solid", fgColor="1E40AF")
+            _c.alignment = _Align(horizontal="center", vertical="center", wrap_text=True)
+            _c.border    = _Border(
+                bottom=_Side(style="thin", color="FFFFFF"),
+                right=_Side(style="thin", color="FFFFFF"),
+            )
+        ws.row_dimensions[_hr].height = 22
 
-        # Datos
-        for row in df.itertuples(index=False):
-            ws.append(list(row))
+        # Datos con filas alternas
+        _col_alt = "EFF6FF"   # azul muy claro
+        for _ri, _row in enumerate(df.itertuples(index=False), 1):
+            ws.append(list(_row))
+            _dr = ws.max_row
+            if _ri % 2 == 0:
+                for _ci2 in range(1, len(df.columns) + 1):
+                    ws.cell(_dr, _ci2).fill = _PFill("solid", fgColor=_col_alt)
+            ws.row_dimensions[_dr].height = 16
 
-        # Ancho automático (aproximado)
-        for col in ws.columns:
-            max_len = max((len(str(c.value or "")) for c in col), default=8)
-            ws.column_dimensions[col[0].column_letter].width = min(max_len + 2, 45)
+        # Anchos automáticos
+        for _col in ws.columns:
+            _max_l = max(
+                (len(str(_c.value or "")) for _c in _col if _c.row > (_hr - 1)),
+                default=8
+            )
+            ws.column_dimensions[_col[0].column_letter].width = min(_max_l + 2, 50)
 
     # ── A. Exportación general ─────────────────────────────────────────────
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
     _col_exp1, _col_exp2 = st.columns([1, 1])
 
-    with _col_exp1:
-        # CSV — tabla filtrada
-        _csv_export = _df_f[[
-            "#","CODIGO_LIMPIO","FAMILIA","estado_op","ult_op",
-            "horas","litros","l_hr","ubicacion","alarma","motivo","dias_sr"
-        ]].rename(columns={
-            "CODIGO_LIMPIO":"Código",    "FAMILIA":"Familia",
-            "estado_op":"Estado",        "ult_op":"Último operador",
-            "horas":"Horas período",     "litros":"Litros período",
-            "l_hr":"L/hr",               "ubicacion":"Ubicación",
-            "alarma":"Alarma",           "motivo":"Motivo alarma",
-            "dias_sr":"Días sin reporte",
-        }).to_csv(index=False).encode("utf-8-sig")
+    # DataFrame de export (toma de _df_f — tabla filtrada, datos crudos)
+    _df_exp_base = _df_f[[
+        "#","CODIGO_LIMPIO","FAMILIA","estado_op","ult_op",
+        "horas","litros","l_hr","ubicacion","indicadores","motivo","dias_sr"
+    ]].rename(columns={
+        "CODIGO_LIMPIO":  "Código",
+        "FAMILIA":        "Familia",
+        "estado_op":      "Estado",
+        "ult_op":         "Último operador",
+        "horas":          "Horas período",
+        "litros":         "Litros período",
+        "l_hr":           "L/hr",
+        "ubicacion":      "Ubicación",
+        "indicadores":    "Indicadores",
+        "motivo":         "Detalle indicadores",
+        "dias_sr":        "Días sin reporte",
+    })
 
+    with _col_exp1:
         st.download_button(
             "📥 Exportar tabla (CSV)",
-            _csv_export,
+            _df_exp_base.to_csv(index=False).encode("utf-8-sig"),
             "maquinas_tabla.csv",
             "text/csv",
             use_container_width=True,
         )
 
     with _col_exp2:
-        # Excel — tabla filtrada con formato
-        _wb_gen = _opxl.Workbook()
-        _ws_gen = _wb_gen.active
-        _ws_gen.title = "Máquinas"
+        # Excel con portada + datos
+        _wb_gen  = _opxl.Workbook()
+        _ws_port = _wb_gen.active
+        _ws_port.title = "Portada"
 
-        _df_excel_gen = _df_f[[
-            "#","CODIGO_LIMPIO","FAMILIA","estado_op","ult_op",
-            "horas","litros","l_hr","ubicacion","alarma","motivo","dias_sr"
-        ]].rename(columns={
-            "CODIGO_LIMPIO":"Código",    "FAMILIA":"Familia",
-            "estado_op":"Estado",        "ult_op":"Último operador",
-            "horas":"Horas período",     "litros":"Litros período",
-            "l_hr":"L/hr",               "ubicacion":"Ubicación",
-            "alarma":"Alarma",           "motivo":"Motivo alarma",
-            "dias_sr":"Días sin reporte",
-        })
-        _df_a_hoja(_ws_gen, _df_excel_gen)
+        # Portada
+        _ws_port.append(["HARCHA MAQUINARIA"])
+        _ws_port.cell(1, 1).font = _Font(bold=True, size=16, color="1E40AF")
+        _ws_port.append(["Reporte de Flota"])
+        _ws_port.cell(2, 1).font = _Font(size=13, color="475569")
+        _ws_port.append([f"Período: {fecha_ini} → {fecha_fin}"])
+        _ws_port.cell(3, 1).font = _Font(size=11)
+        _ws_port.append([f"Generado: {pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')}"])
+        _ws_port.append([])
+        _ws_port.append([f"Máquinas mostradas: {len(_df_exp_base)}"])
+        _ws_port.append([f"Filtro familia: {_fam_sel}"])
+        _ws_port.append([f"Filtro estado: {_est_sel}"])
+        _ws_port.column_dimensions["A"].width = 35
+
+        # Hoja datos
+        _ws_dat = _wb_gen.create_sheet("Máquinas")
+        _df_a_hoja(_ws_dat, _df_exp_base)
+
         _buf_gen = _io_exp.BytesIO()
         _wb_gen.save(_buf_gen)
         _buf_gen.seek(0)
@@ -1711,143 +2012,157 @@ with tab_maq:
             use_container_width=True,
         )
 
-    # ── B. Exportación por máquina seleccionada ────────────────────────────
+    # ── B. Exportación historial individual ────────────────────────────────
     if _codigo_sel:
-        st.markdown(f"""
-        <div style="font-size:12px;color:var(--texto-2);margin-top:4px;margin-bottom:6px">
-            Máquina seleccionada: <b>{_codigo_sel}</b>
-            — Disponible exportación de historial completo
-        </div>""", unsafe_allow_html=True)
-
-        # Obtener ID_MAQUINA de la selección
-        _id_sel = _df_f[_df_f["CODIGO_LIMPIO"] == _codigo_sel]["ID_MAQUINA"].iloc[0] \
-                  if not _df_f[_df_f["CODIGO_LIMPIO"] == _codigo_sel].empty else None
+        _id_sel = None
+        _rows_sel = _df_f[_df_f["CODIGO_LIMPIO"] == _codigo_sel]
+        if not _rows_sel.empty:
+            _id_sel = _rows_sel["ID_MAQUINA"].iloc[0]
 
         if _id_sel and pd.notna(_id_sel):
-            # Datos de la fila seleccionada (de _tabla, no _df_v)
-            _row_sel = _tabla[_tabla["ID_MAQUINA"] == _id_sel].iloc[0]
-
-            # Historial completo de reportes y recargas para esta máquina
-            _rep_maq = _df_rep_hist[
-                _df_rep_hist["ID_MAQUINA"] == _id_sel
-            ].sort_values("FECHAHORA_INICIO", ascending=False).copy()
-
-            _rec_maq = _df_rec_hist[
-                _df_rec_hist["ID_MAQUINA"] == _id_sel
-            ].copy()
+            _row_sel  = _tabla[_tabla["ID_MAQUINA"] == _id_sel].iloc[0]
+            _rep_maq  = _df_rep_hist[_df_rep_hist["ID_MAQUINA"] == _id_sel].sort_values(
+                "FECHAHORA_INICIO", ascending=False).copy()
+            _rec_maq  = _df_rec_hist[_df_rec_hist["ID_MAQUINA"] == _id_sel].copy()
             if not _rec_maq.empty:
                 _rec_maq["_f"] = pd.to_datetime(_rec_maq["FECHA"], errors="coerce")
                 _rec_maq = _rec_maq.sort_values("_f", ascending=False)
 
-            # Marcar registros dentro del período seleccionado
             if not _rep_maq.empty:
-                _rep_maq["en_periodo"] = (
+                _rep_maq["En período"] = (
                     (_rep_maq["FECHAHORA_INICIO"].dt.date >= fecha_ini) &
                     (_rep_maq["FECHAHORA_INICIO"].dt.date <= fecha_fin)
                 )
-
             if not _rec_maq.empty:
-                _rec_maq["en_periodo"] = (
+                _rec_maq["En período"] = (
                     (_rec_maq["_f"].dt.date >= fecha_ini) &
                     (_rec_maq["_f"].dt.date <= fecha_fin)
                 )
 
-            # Secuencia de obras para análisis
             _eventos_maq = _hist_comb.get(_id_sel, [])
-            _seq_obras = [
-                {"Fecha": e[0], "Obra": e[1], "Fuente": e[2]}
-                for e in _eventos_maq
-            ]
-            _df_seq = pd.DataFrame(_seq_obras) if _seq_obras else pd.DataFrame(
-                columns=["Fecha","Obra","Fuente"]
-            )
+            _df_seq = pd.DataFrame(
+                [{"Fecha": e[0], "Obra": e[1], "Fuente": e[2]} for e in _eventos_maq]
+            ) if _eventos_maq else pd.DataFrame(columns=["Fecha","Obra","Fuente"])
+
+            # Indicadores de esta máquina
+            _ind_row   = _row_sel.get("indicadores", "")
+            _ind_det_r = _row_sel.get("indicadores_det", {})
+            _det_txt   = []
+            if isinstance(_ind_det_r, dict):
+                if "cambio_obra" in _ind_det_r:
+                    _det_txt.append(f"🔔 {_ind_det_r['cambio_obra']}")
+                if "inactividad" in _ind_det_r:
+                    _det_txt.append(f"💤 {_ind_det_r['inactividad']}")
+                if "uso" in _ind_det_r:
+                    _u = _ind_det_r["uso"]
+                    _det_txt.append(
+                        f"📊 Prom {_u['prom']} h/día · {_u['clasif']} · "
+                        f"Variación {_u['variacion']} · {_u['concl'][1]}"
+                    )
 
             # Construir Excel multi-hoja
             _wb_maq = _opxl.Workbook()
 
-            # HOJA 1: RESUMEN
+            # HOJA 1 — Resumen
             _ws1 = _wb_maq.active
             _ws1.title = "Resumen"
-            _resumen_rows = [
-                ["Máquina",           _codigo_sel],
-                ["Familia",           _row_sel["FAMILIA"]],
-                ["Estado",            _row_sel["estado_op"]],
-                ["Período desde",     str(fecha_ini)],
-                ["Período hasta",     str(fecha_fin)],
-                ["Horas período",     _row_sel["horas"]],
-                ["Litros período",    _row_sel["litros"]],
-                ["L/hr",              _row_sel["l_hr"]],
-                ["Último operador",   _row_sel["ult_op"]],
-                ["Última ubicación",  _row_sel["ubicacion"]],
-                ["Días sin reporte",  _row_sel["dias_sr"] if pd.notna(_row_sel["dias_sr"]) else "Sin historial"],
-                ["Cambio de obra",    "Sí — " + _row_sel["motivo"] if _row_sel["alarma"] == "🔔" else "No"],
-            ]
-            for _r in _resumen_rows:
-                _ws1.append(_r)
-                _ws1.cell(_ws1.max_row, 1).font = _Font(bold=True)
-            _ws1.column_dimensions["A"].width = 22
-            _ws1.column_dimensions["B"].width = 45
+            _ws1.append(["HARCHA MAQUINARIA — FICHA DE MÁQUINA"])
+            _ws1.cell(1, 1).font = _Font(bold=True, size=14, color="1E40AF")
+            _ws1.append([])
 
-            # HOJA 2: REPORTES (historial completo)
+            _seccion_rows = [
+                ("IDENTIFICACIÓN",),
+                ("Código",     _codigo_sel),
+                ("Familia",    _row_sel["FAMILIA"]),
+                ("Estado",     _row_sel["estado_op"]),
+                ("",),
+                ("PERÍODO ANALIZADO",),
+                ("Desde",      str(fecha_ini)),
+                ("Hasta",      str(fecha_fin)),
+                ("",),
+                ("RENDIMIENTO PERÍODO",),
+                ("Horas",      _row_sel["horas"]),
+                ("Litros",     _row_sel["litros"]),
+                ("L/hr",       _row_sel["l_hr"]),
+                ("",),
+                ("HISTORIAL COMPLETO",),
+                ("Último operador",  _row_sel["ult_op"]),
+                ("Última ubicación", _row_sel["ubicacion"]),
+                ("Días sin reporte", _row_sel["dias_sr"] if pd.notna(_row_sel["dias_sr"]) else "Sin historial"),
+                ("",),
+                ("INDICADORES",),
+                ("Iconos activos", _ind_row if _ind_row else "Ninguno"),
+            ]
+            for _det in _det_txt:
+                _seccion_rows.append(("Detalle", _det))
+
+            for _r in _seccion_rows:
+                _ws1.append(list(_r))
+                _cr = _ws1.max_row
+                if len(_r) == 1 and _r[0]:  # títulos de sección
+                    _ws1.cell(_cr, 1).font = _Font(bold=True, color="1E40AF", size=10)
+                    _ws1.cell(_cr, 1).fill = _PFill("solid", fgColor="EFF6FF")
+                elif len(_r) >= 2:
+                    _ws1.cell(_cr, 1).font = _Font(bold=True)
+
+            _ws1.column_dimensions["A"].width = 24
+            _ws1.column_dimensions["B"].width = 48
+
+            # HOJA 2 — Reportes
             _ws2 = _wb_maq.create_sheet("Reportes")
             if not _rep_maq.empty:
-                _cols_rep = [c for c in [
-                    "FECHAHORA_INICIO","HORAS_TRABAJADAS","USUARIO_TXT",
-                    "OBRA_TXT","MAQUINA_TXT","DESCRIPCION","en_periodo"
-                ] if c in _rep_maq.columns]
-                _df_a_hoja(_ws2, _rep_maq[_cols_rep].rename(columns={
+                _cols_r = [c for c in ["FECHAHORA_INICIO","HORAS_TRABAJADAS","USUARIO_TXT",
+                                        "OBRA_TXT","DESCRIPCION","En período"] if c in _rep_maq.columns]
+                _df_a_hoja(_ws2, _rep_maq[_cols_r].rename(columns={
                     "FECHAHORA_INICIO":"Fecha/Hora","HORAS_TRABAJADAS":"Horas",
                     "USUARIO_TXT":"Operador","OBRA_TXT":"Obra",
-                    "MAQUINA_TXT":"Máquina","DESCRIPCION":"Descripción",
-                    "en_periodo":"En período",
+                    "DESCRIPCION":"Descripción",
                 }))
             else:
-                _ws2.append(["Sin reportes en el historial"])
+                _ws2.append(["Sin reportes en historial"])
 
-            # HOJA 3: COMBUSTIBLE (historial completo)
+            # HOJA 3 — Combustible
             _ws3 = _wb_maq.create_sheet("Combustible")
             if not _rec_maq.empty:
-                _cols_rec = [c for c in [
-                    "_f","LITROS","USUARIO_ID","OBRA_ID","ODOMETRO","en_periodo"
-                ] if c in _rec_maq.columns]
-                _df_a_hoja(_ws3, _rec_maq[_cols_rec].rename(columns={
+                _cols_c = [c for c in ["_f","LITROS","USUARIO_ID","OBRA_ID",
+                                        "ODOMETRO","En período"] if c in _rec_maq.columns]
+                _df_a_hoja(_ws3, _rec_maq[_cols_c].rename(columns={
                     "_f":"Fecha","LITROS":"Litros","USUARIO_ID":"Responsable",
                     "OBRA_ID":"Obra","ODOMETRO":"Odómetro",
-                    "en_periodo":"En período",
                 }))
             else:
-                _ws3.append(["Sin recargas en el historial"])
+                _ws3.append(["Sin recargas en historial"])
 
-            # HOJA 4: ANÁLISIS DE OBRA (secuencia cronológica)
+            # HOJA 4 — Análisis de obra
             _ws4 = _wb_maq.create_sheet("Análisis obra")
             if not _df_seq.empty:
-                _df_a_hoja(_ws4, _df_seq)
-                # Agregar resumen de obras al final
+                _df_a_hoja(_ws4, _df_seq, f"Secuencia de obras — {_codigo_sel}")
                 from collections import Counter as _Cnt
-                _conteo_obras = _Cnt(_df_seq["Obra"].tolist()).most_common()
+                _conteo = _Cnt(_df_seq["Obra"].tolist()).most_common()
                 _ws4.append([])
-                _ws4.append(["OBRA MÁS FRECUENTE:", _conteo_obras[0][0] if _conteo_obras else "—"])
-                _ws4.append(["TOTAL EVENTOS:",       len(_df_seq)])
-                _ws4.append(["OBRAS DISTINTAS:",     _df_seq["Obra"].nunique()])
+                _ws4.append(["RESUMEN"])
+                _ws4.cell(_ws4.max_row, 1).font = _Font(bold=True, color="1E40AF")
+                _ws4.append(["Obra más frecuente:", _conteo[0][0] if _conteo else "—"])
+                _ws4.append(["Total eventos:",       len(_df_seq)])
+                _ws4.append(["Obras distintas:",     _df_seq["Obra"].nunique()])
             else:
-                _ws4.append(["Sin historial de obras disponible"])
+                _ws4.append(["Sin historial de obras"])
 
-            # Guardar y ofrecer descarga
             _buf_maq = _io_exp.BytesIO()
             _wb_maq.save(_buf_maq)
             _buf_maq.seek(0)
 
             st.download_button(
-                f"📄 Exportar historial de {_codigo_sel} (Excel)",
+                f"📄 Historial completo — {_codigo_sel}",
                 _buf_maq.getvalue(),
-                f"historial_{_codigo_sel.replace('-','_')}.xlsx",
+                f"historial_{_codigo_sel.replace('-','_').replace(' ','_')}.xlsx",
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             )
         else:
             st.caption("⚠ Esta máquina no tiene ID vinculado en el sistema.")
     else:
-        st.caption("💡 Haz clic en una fila de la tabla para habilitar la exportación individual.")
+        st.caption("💡 Haz clic en una fila para habilitar la exportación individual.")
 
 # TAB 3 — OPERADORES
 # ════════════════════════════════════════════════════════════
