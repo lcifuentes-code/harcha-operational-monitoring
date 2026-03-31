@@ -1177,16 +1177,10 @@ with tab_maq:
     import re as _re_obra
 
     # Cargar mapa ID_OBRA → OBRA desde la hoja OBRAS del Excel
+    # session_state["archivo_bytes"] siempre contiene bytes → BytesIO directo
     try:
         _df_obras_raw = pd.read_excel(
-            st.session_state.archivo_bytes
-            if isinstance(st.session_state.get("archivo_bytes"), (bytes, bytearray))
-            else open(
-                str(__import__("pathlib").Path(__file__).parent
-                    / "data" / "raw" / st.session_state.get("archivo_nombre","")),
-                "rb"
-            ).read()
-            if False else io.BytesIO(st.session_state["archivo_bytes"]),
+            io.BytesIO(st.session_state["archivo_bytes"]),
             sheet_name="OBRAS"
         )
         _df_obras_raw = _df_obras_raw.dropna(subset=["ID_OBRA","OBRA"])
@@ -1862,126 +1856,138 @@ with tab_maq:
               ✓ Sin indicadores activos
             </div>"""
 
-        # ── Renderizar TODA la tarjeta en un solo st.markdown() ───────────
-        st.markdown(f"""
-        <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:14px;
-                    overflow:hidden;margin:12px 0 6px;
-                    box-shadow:0 4px 20px rgba(0,0,0,.08)">
+        # ── SOLUCIÓN AL BUG DE RENDERIZADO ────────────────────────────────
+        # st.markdown() procesa el texto como Markdown ANTES de renderizar HTML.
+        # Líneas con 4+ espacios de sangría se convierten en bloques de código
+        # (<code>), que escapa el HTML y lo muestra como texto literal.
+        # st.components.v1.html() bypasea completamente el parser Markdown
+        # y renderiza HTML puro directamente en un iframe aislado.
+        # ─────────────────────────────────────────────────────────────────
+        import streamlit.components.v1 as _stc_maq
 
-          <!-- HEADER -->
-          <div style="background:{_hdr_bg};padding:16px 20px 14px;
-                      display:flex;justify-content:space-between;align-items:flex-start">
-            <div>
-              <div style="font-size:17px;font-weight:800;color:#fff;
-                          letter-spacing:.01em;line-height:1.2;margin-bottom:7px">
-                {_codigo_sel} — {_fam_m}
-              </div>
-              <span style="display:inline-block;padding:3px 11px;
-                           background:{_badge_bg};color:{_badge_cl};
-                           border-radius:20px;font-size:10.5px;font-weight:700;
-                           letter-spacing:.06em">
-                {_badge_txt}
-              </span>
-            </div>
-            <div style="color:rgba(255,255,255,.55);font-size:11px;text-align:right;
-                        margin-top:2px;line-height:1.6">
-              Período analizado<br>
-              <span style="color:rgba(255,255,255,.8);font-weight:600">
-                {fecha_ini.strftime('%d/%m/%Y')} → {fecha_fin.strftime('%d/%m/%Y')}
-              </span>
-            </div>
-          </div>
+        # Altura dinámica según número de indicadores activos
+        _n_ind_act = sum(1 for k in ["cambio_obra","inactividad","uso"]
+                         if k in (_det_m or {}))
+        _modal_h   = max(400, 300 + max(260, 50 + _n_ind_act * 115)) + 20
 
-          <!-- BODY: 2 columnas -->
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:0">
+        # Construir HTML completo como string Python limpio (sin indentación problemática)
+        _html_modal = (
+            "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+            "<style>"
+            "* {box-sizing:border-box;margin:0;padding:0;}"
+            "body {font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;"
+            "background:transparent;padding:4px;}"
+            ".row {display:flex;justify-content:space-between;align-items:flex-start;"
+            "padding:5px 0;border-bottom:1px solid #F1F5F9;font-size:12.5px;}"
+            ".row:last-child {border-bottom:none;}"
+            ".lbl {color:#64748B;flex-shrink:0;padding-right:8px;}"
+            ".val {font-weight:600;color:#0F172A;text-align:right;word-break:break-word;max-width:155px;}"
+            ".ind-block {border-radius:0 8px 8px 0;padding:10px 14px;margin-bottom:8px;}"
+            ".badge {display:inline-block;padding:2px 9px;border-radius:12px;"
+            "font-size:11px;font-weight:600;margin-right:4px;margin-bottom:4px;}"
+            ".kpi {flex:1;border-radius:10px;padding:10px 8px;text-align:center;}"
+            ".kpi-val {font-size:15px;font-weight:800;line-height:1;}"
+            ".kpi-lbl {font-size:9.5px;color:#64748B;margin-top:4px;letter-spacing:.04em;}"
+            ".sect-lbl {font-size:10.5px;font-weight:700;text-transform:uppercase;"
+            "color:#94A3B8;letter-spacing:.07em;margin-bottom:10px;}"
+            "</style></head><body>"
+            # ── OUTER CARD
+            "<div style='background:#F8FAFC;border:1px solid #E2E8F0;border-radius:14px;"
+            "overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,.08);'>"
+            # ── HEADER
+            f"<div style='background:{_hdr_bg};padding:16px 20px 14px;"
+            "display:flex;justify-content:space-between;align-items:flex-start;'>"
+            "<div>"
+            f"<div style='font-size:17px;font-weight:800;color:#fff;margin-bottom:7px;'>"
+            f"{_codigo_sel} — {_fam_m}</div>"
+            f"<span style='display:inline-block;padding:3px 11px;background:{_badge_bg};"
+            f"color:{_badge_cl};border-radius:20px;font-size:10.5px;font-weight:700;"
+            f"letter-spacing:.06em;'>{_badge_txt}</span>"
+            "</div>"
+            f"<div style='color:rgba(255,255,255,.55);font-size:11px;text-align:right;line-height:1.6;'>"
+            f"Período analizado<br><span style='color:rgba(255,255,255,.8);font-weight:600;'>"
+            f"{fecha_ini.strftime('%d/%m/%Y')} → {fecha_fin.strftime('%d/%m/%Y')}</span></div>"
+            "</div>"
+            # ── BODY GRID
+            "<div style='display:grid;grid-template-columns:1fr 1fr;'>"
+            # ── LEFT COL: actividad + rendimiento
+            "<div style='padding:18px 20px;border-right:1px solid #E2E8F0;'>"
+            "<div class='sect-lbl'>📡 Actividad</div>"
+            f"<div class='row'><span class='lbl'>Último reporte</span><span class='val'>{_ult_rep_fmt}</span></div>"
+            f"<div class='row'><span class='lbl'>Última recarga</span><span class='val'>{_ult_rec_fmt}</span></div>"
+            f"<div class='row'><span class='lbl'>Días sin reporte</span><span class='val'>{_dia_m}</span></div>"
+            f"<div class='row'><span class='lbl'>Operador</span><span class='val'>{_op_m}</span></div>"
+            f"<div class='row'><span class='lbl'>Ubicación</span>"
+            f"<span class='val' style='font-size:11px;'>{_ub_m}</span></div>"
+            "<div style='margin-top:16px;' class='sect-lbl'>⏱ Rendimiento período</div>"
+            "<div style='display:flex;gap:8px;'>"
+            f"<div class='kpi' style='background:#EFF6FF;'>"
+            f"<div class='kpi-val' style='color:#1E40AF;'>{_hrs_m}</div>"
+            "<div class='kpi-lbl'>HORAS</div></div>"
+            f"<div class='kpi' style='background:#FFFBEB;'>"
+            f"<div class='kpi-val' style='color:#92400E;'>{_lit_m}</div>"
+            "<div class='kpi-lbl'>LITROS</div></div>"
+            f"<div class='kpi' style='background:#F0FDF4;'>"
+            f"<div class='kpi-val' style='color:#065F46;'>{_lhr_m}</div>"
+            "<div class='kpi-lbl'>L/HR</div></div>"
+            "</div>"   # end flex rendimiento
+            "</div>"   # end left col
+            # ── RIGHT COL: indicadores
+            "<div style='padding:18px 20px;'>"
+            "<div class='sect-lbl'>🚨 Indicadores</div>"
+        )
 
-            <!-- COLUMNA IZQUIERDA: actividad + rendimiento -->
-            <div style="padding:18px 20px;border-right:1px solid #E2E8F0">
+        # Añadir bloques de indicadores al HTML
+        if not isinstance(_det_m, dict) or not _det_m:
+            _html_modal += (
+                "<div style='text-align:center;padding:28px 0;color:#94A3B8;font-size:13px;'>"
+                "✓ Sin indicadores activos</div>"
+            )
+        else:
+            if "cambio_obra" in _det_m:
+                _html_modal += (
+                    "<div class='ind-block' style='background:#FEF2F2;"
+                    "border-left:3px solid #EF4444;'>"
+                    "<div style='font-size:12px;font-weight:700;color:#B91C1C;margin-bottom:3px;'>"
+                    "🔔 Cambio de obra</div>"
+                    f"<div style='font-size:12px;color:#7F1D1D;line-height:1.5;'>"
+                    f"{_det_m['cambio_obra']}</div></div>"
+                )
+            if "inactividad" in _det_m:
+                _html_modal += (
+                    "<div class='ind-block' style='background:#F1F5F9;"
+                    "border-left:3px solid #94A3B8;'>"
+                    "<div style='font-size:12px;font-weight:700;color:#475569;margin-bottom:3px;'>"
+                    "💤 Inactividad</div>"
+                    f"<div style='font-size:12px;color:#64748B;'>{_det_m['inactividad']}</div></div>"
+                )
+            if "uso" in _det_m:
+                _u   = _det_m["uso"]
+                _ci  = _u["concl"][0]
+                _ct  = _u["concl"][1]
+                _cc  = {"✔":"#065F46","⚠":"#92400E","❌":"#B91C1C"}.get(_ci,"#374151")
+                _cb  = {"✔":"#D1FAE5","⚠":"#FEF3C7","❌":"#FEE2E2"}.get(_ci,"#F3F4F6")
+                _cfc = {"Óptimo":"#065F46","Normal":"#1E40AF",
+                        "Bajo":"#92400E","Irregular":"#B91C1C"}.get(_u["clasif"],"#374151")
+                _html_modal += (
+                    "<div class='ind-block' style='background:#F0F9FF;"
+                    "border-left:3px solid #38BDF8;'>"
+                    "<div style='font-size:12px;font-weight:700;color:#0369A1;margin-bottom:6px;'>"
+                    "📊 Uso / Eficiencia — últimos 30 días</div>"
+                    "<div style='display:flex;flex-wrap:wrap;gap:5px;margin-bottom:6px;'>"
+                    f"<span class='badge' style='background:#E0F2FE;color:#0369A1;'>{_u['prom']} h/día</span>"
+                    f"<span class='badge' style='background:#E0F2FE;color:#0369A1;'>Var. {_u['variacion']}</span>"
+                    f"<span class='badge' style='background:#E0F2FE;color:{_cfc};'>{_u['clasif']}</span>"
+                    "</div>"
+                    f"<div style='background:{_cb};color:{_cc};padding:5px 10px;"
+                    f"border-radius:6px;font-size:12px;font-weight:600;'>{_ci} {_ct}</div>"
+                    "</div>"
+                )
 
-              <!-- Actividad -->
-              <div style="font-size:10.5px;font-weight:700;letter-spacing:.08em;
-                          text-transform:uppercase;color:#94A3B8;margin-bottom:10px">
-                📡 Actividad
-              </div>
-              <table style="width:100%;font-size:12.5px;border-collapse:collapse;
-                            margin-bottom:16px">
-                <tr>
-                  <td style="color:#64748B;padding:4px 0;width:50%">Último reporte</td>
-                  <td style="font-weight:600;color:#0F172A;text-align:right">
-                    {_ult_rep_fmt}
-                  </td>
-                </tr>
-                <tr>
-                  <td style="color:#64748B;padding:4px 0">Última recarga</td>
-                  <td style="font-weight:600;color:#0F172A;text-align:right">
-                    {_ult_rec_fmt}
-                  </td>
-                </tr>
-                <tr>
-                  <td style="color:#64748B;padding:4px 0">Días sin reporte</td>
-                  <td style="font-weight:600;color:#0F172A;text-align:right">
-                    {_dia_m}
-                  </td>
-                </tr>
-                <tr>
-                  <td style="color:#64748B;padding:4px 0">Operador</td>
-                  <td style="font-weight:600;color:#0F172A;text-align:right;
-                              max-width:150px;word-break:break-word">
-                    {_op_m}
-                  </td>
-                </tr>
-                <tr>
-                  <td style="color:#64748B;padding:4px 0">Ubicación</td>
-                  <td style="font-weight:600;color:#0F172A;text-align:right;
-                              max-width:150px;word-break:break-word;font-size:11.5px">
-                    {_ub_m}
-                  </td>
-                </tr>
-              </table>
+        # Cerrar tarjeta
+        _html_modal += "</div></div></div></body></html>"
 
-              <!-- Rendimiento período -->
-              <div style="font-size:10.5px;font-weight:700;letter-spacing:.08em;
-                          text-transform:uppercase;color:#94A3B8;margin-bottom:10px">
-                ⏱ Rendimiento período
-              </div>
-              <div style="display:flex;gap:8px">
-                <div style="flex:1;background:#EFF6FF;border-radius:10px;
-                            padding:11px 8px;text-align:center">
-                  <div style="font-size:17px;font-weight:800;color:#1E40AF;
-                              line-height:1">{_hrs_m}</div>
-                  <div style="font-size:9.5px;color:#64748B;margin-top:4px;
-                              letter-spacing:.04em">HORAS</div>
-                </div>
-                <div style="flex:1;background:#FFFBEB;border-radius:10px;
-                            padding:11px 8px;text-align:center">
-                  <div style="font-size:17px;font-weight:800;color:#92400E;
-                              line-height:1">{_lit_m}</div>
-                  <div style="font-size:9.5px;color:#64748B;margin-top:4px;
-                              letter-spacing:.04em">LITROS</div>
-                </div>
-                <div style="flex:1;background:#F0FDF4;border-radius:10px;
-                            padding:11px 8px;text-align:center">
-                  <div style="font-size:17px;font-weight:800;color:#065F46;
-                              line-height:1">{_lhr_m}</div>
-                  <div style="font-size:9.5px;color:#64748B;margin-top:4px;
-                              letter-spacing:.04em">L/HR</div>
-                </div>
-              </div>
-
-            </div>
-
-            <!-- COLUMNA DERECHA: indicadores -->
-            <div style="padding:18px 20px">
-              <div style="font-size:10.5px;font-weight:700;letter-spacing:.08em;
-                          text-transform:uppercase;color:#94A3B8;margin-bottom:10px">
-                🚨 Indicadores
-              </div>
-              {_ind_html}
-            </div>
-
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
+        _stc_maq.html(_html_modal, height=_modal_h, scrolling=True)
 
 
     # ────────────────────────────────────────────────────────────────────────
@@ -2292,8 +2298,10 @@ with tab_ops:
             st.markdown('<div class="seccion"><div class="seccion-titulo">📊 Horas por operador (top 20)</div>', unsafe_allow_html=True)
             top20_ops = ops_df.head(20).copy()
             top20_ops["Nombre"] = top20_ops["USUARIO_TXT"].str[:26]
-            st.bar_chart(top20_ops.set_index("Nombre")["total_horas"],
-                         height=360, color="#10B981", horizontal=True, use_container_width=True)
+            _chart_ops = top20_ops[top20_ops["total_horas"] > 0]
+            if not _chart_ops.empty:
+                st.bar_chart(_chart_ops.set_index("Nombre")["total_horas"],
+                             height=360, color="#10B981", horizontal=True, use_container_width=True)
             st.markdown("</div>", unsafe_allow_html=True)
 
         st.markdown('<div class="seccion"><div class="seccion-titulo">📋 Detalle completo</div>', unsafe_allow_html=True)
@@ -2331,8 +2339,10 @@ with tab_comb:
             st.markdown('<div class="seccion"><div class="seccion-titulo">⛽ Consumo por máquina (top 20)</div>', unsafe_allow_html=True)
             top20_c = comb_df.head(20).copy()
             top20_c["Nombre"] = top20_c[ncol].fillna(top20_c["ID_MAQUINA"]).str[:28]
-            st.bar_chart(top20_c.set_index("Nombre")["total_litros"],
-                         height=360, color="#F59E0B", horizontal=True, use_container_width=True)
+            _chart_comb = top20_c[top20_c["total_litros"] > 0]
+            if not _chart_comb.empty:
+                st.bar_chart(_chart_comb.set_index("Nombre")["total_litros"],
+                             height=360, color="#F59E0B", horizontal=True, use_container_width=True)
             st.markdown("</div>", unsafe_allow_html=True)
 
         with cp:
