@@ -1230,11 +1230,11 @@ with tab_maq:
             return None
 
         # Limpiar string: eliminar corchetes iniciales y espacios
-        s = _re_m.sub(r"^\[+", "", str(texto).strip()).strip()
+        s = re.sub(r"^\[+", "", str(texto).strip()).strip()
 
         # Caso especial: CUATRI (tiene espacio en lugar de guión: "CUATRI 01")
         if s.upper().startswith("CUATRI"):
-            m = _re_m.match(r"(CUATRI[\s\-]\d+)", s, _re_m.IGNORECASE)
+            m = re.match(r"(CUATRI[\s\-]\d+)", s, re.IGNORECASE)
             if m:
                 # Devolver tal como viene en la base (buscar en BASE_SET)
                 candidato = m.group(1)
@@ -1247,7 +1247,7 @@ with tab_maq:
 
         # Patrón general: LETRAS (1-4) + "-" + NÚMERO (1-3 dígitos)
         # Preserva el case exacto del input
-        m = _re_m.match(r"([A-Za-z]{1,4})-(\d{1,3})", s)
+        m = re.match(r"([A-Za-z]{1,4})-(\d{1,3})", s)
         if m:
             return f"{m.group(1)}-{m.group(2)}"
 
