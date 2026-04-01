@@ -2620,474 +2620,339 @@ with tab_comb:
 
 
 
+
 # ════════════════════════════════════════════════════════════
 # TAB 5 — REPORTES
 # ════════════════════════════════════════════════════════════
+# Diseño igual al tab Máquinas:
+#   • Una tabla principal con selección de fila
+#   • Detalle dinámico debajo al hacer clic
+#   • Sin rankings ni KPIs complejos
+# ════════════════════════════════════════════════════════════
 with tab_rep:
 
-    # ── Cargar datos cacheados ────────────────────────────────────────────────
-    _rp = _calc_reportes(st.session_state["archivo_bytes"])
+    # ── Datos cacheados ───────────────────────────────────────────────────────
+    _rp        = _calc_reportes(st.session_state["archivo_bytes"])
     _df_ctrl   = _rp["df_ctrl"].copy()
     _df_fallas = _rp["df_fallas"].copy()
     _df_histo  = _rp["df_histo"].copy()
-    _df_patron = _rp["df_patron"].copy()
     _mapa_cod  = _rp["mapa_cod"]
     _fecha_max = _rp["fecha_max"]
-    _lsr       = _rp["litros_sin_respaldo"]
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # SECCIÓN 1 — KPIs + ALERTA GLOBAL
-    # ─────────────────────────────────────────────────────────────────────────
-
-    _n_sr     = len(_df_ctrl)
-    _n_crit   = (_df_ctrl["NIVEL"] == "CRITICO").sum()
-    _n_seg    = (_df_ctrl["NIVEL"] == "SEGUIMIENTO").sum()
-    _n_falla  = int(_df_fallas["FALLA_REPORTE"].sum())
-    _n_critp  = (_df_patron["SEVERIDAD"] == "CRITICO").sum()   if not _df_patron.empty else 0
-    _n_rachaG = int(_df_patron["RACHA_MAX"].max())              if not _df_patron.empty else 0
-
-    # KPI: litros sin respaldo formateado
-    _lsr_fmt = f"{_lsr:,.0f} L"
+    # ── KPIs compactos (1 fila, sin jerarquía) ────────────────────────────────
+    _kc = (_df_ctrl["NIVEL"] == "CRITICO").sum()
+    _ks = (_df_ctrl["NIVEL"] == "SEGUIMIENTO").sum()
+    _kf = int(_df_fallas["FALLA_REPORTE"].sum())
 
     st.markdown(f"""
     <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap">
         <div style="background:#B91C1C;color:#fff;border-radius:8px;
-                    padding:10px 20px;text-align:center;min-width:92px">
-            <div style="font-size:22px;font-weight:800">{_n_crit}</div>
-            <div style="font-size:10px;opacity:.85;letter-spacing:.04em">🔴 CRÍTICAS ≥5d</div>
+                    padding:8px 18px;text-align:center;min-width:80px">
+            <div style="font-size:20px;font-weight:800">{_kc}</div>
+            <div style="font-size:10px;opacity:.85">🔴 CRÍTICAS ≥5d</div>
         </div>
         <div style="background:#92400E;color:#fff;border-radius:8px;
-                    padding:10px 20px;text-align:center;min-width:92px">
-            <div style="font-size:22px;font-weight:800">{_n_seg}</div>
-            <div style="font-size:10px;opacity:.85;letter-spacing:.04em">🟡 SEGUIMIENTO 1-4d</div>
-        </div>
-        <div style="background:#1E40AF;color:#fff;border-radius:8px;
-                    padding:10px 20px;text-align:center;min-width:92px">
-            <div style="font-size:22px;font-weight:800">{_n_sr}</div>
-            <div style="font-size:10px;opacity:.85;letter-spacing:.04em">TOTAL SIN REPORTE</div>
+                    padding:8px 18px;text-align:center;min-width:80px">
+            <div style="font-size:20px;font-weight:800">{_ks}</div>
+            <div style="font-size:10px;opacity:.85">🟡 SEGUIMIENTO</div>
         </div>
         <div style="background:#6D28D9;color:#fff;border-radius:8px;
-                    padding:10px 20px;text-align:center;min-width:92px">
-            <div style="font-size:22px;font-weight:800">{_n_falla}</div>
-            <div style="font-size:10px;opacity:.85;letter-spacing:.04em">⚠ ACTIVIDAD S/REP.</div>
-        </div>
-        <div style="background:#7C3AED;color:#fff;border-radius:8px;
-                    padding:10px 20px;text-align:center;min-width:110px">
-            <div style="font-size:18px;font-weight:800">{_lsr_fmt}</div>
-            <div style="font-size:10px;opacity:.85;letter-spacing:.04em">⛽ LITROS SIN RESPALDO</div>
+                    padding:8px 18px;text-align:center;min-width:80px">
+            <div style="font-size:20px;font-weight:800">{_kf}</div>
+            <div style="font-size:10px;opacity:.85">⚠ ACTIVIDAD S/REP.</div>
         </div>
         <div style="background:#374151;color:#fff;border-radius:8px;
-                    padding:10px 20px;text-align:center;min-width:110px">
-            <div style="font-size:17px;font-weight:700">{str(_fecha_max)}</div>
-            <div style="font-size:10px;opacity:.85;letter-spacing:.04em">ÚLTIMO DATO</div>
+                    padding:8px 18px;text-align:center;min-width:110px">
+            <div style="font-size:14px;font-weight:700">{str(_fecha_max)}</div>
+            <div style="font-size:10px;opacity:.85">REFERENCIA</div>
         </div>
     </div>
     """, unsafe_allow_html=True)
 
-    # Alerta global si hay patrones críticos o rachas largas
-    if _n_critp > 0 or _n_rachaG >= 3:
-        st.error(
-            f"🚨 Se detectaron **{_n_critp}** máquinas operando sin control "
-            f"(actividad sin reporte recurrente) · Racha máxima: **{_n_rachaG} días** consecutivos"
-        )
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # SECCIÓN 2 — MÁQUINAS ACTIVAS SIN CONTROL (patrón por máquina)
-    # ─────────────────────────────────────────────────────────────────────────
-    if not _df_patron.empty:
-        st.markdown(
-            '<div class="seccion">'
-            '<div class="seccion-titulo">🔥 Máquinas activas sin control'
-            '<span style="font-size:11px;color:var(--texto-3);font-weight:400;margin-left:8px">'
-            'Ordenadas por eventos de actividad sin reporte · CRITICO ≥5 eventos'
-            '</span></div>',
-            unsafe_allow_html=True,
-        )
-
-        def _color_sev(val):
-            return {
-                "CRITICO":       "background-color:#FEE2E2;color:#B91C1C;font-weight:700",
-                "ALERTA":        "background-color:#FEF3C7;color:#92400E;font-weight:700",
-                "EVENTO PUNTUAL":"background-color:#DBEAFE;color:#1E40AF",
-            }.get(str(val), "")
-
-        _v_patron = _df_patron[[
-            "#","_COD","EQUIPO_FAMILIA","EVENTOS","LITROS_SF","RACHA_MAX","SEVERIDAD"
-        ]].rename(columns={
-            "_COD":          "Código",
-            "EQUIPO_FAMILIA":"Familia",
-            "EVENTOS":       "Eventos s/rep.",
-            "LITROS_SF":     "Litros sin rep.",
-            "RACHA_MAX":     "Racha máx. (d)",
-            "SEVERIDAD":     "Severidad",
-        })
-        _v_patron["Litros sin rep."] = _v_patron["Litros sin rep."].apply(
-            lambda x: f"{x:,.0f} L" if x > 0 else "—"
-        )
-
-        st.dataframe(
-            _v_patron.style.map(_color_sev, subset=["Severidad"]),
-            use_container_width=True,
-            hide_index=True,
-            height=min(40 * len(_v_patron) + 42, 420),
-            column_config={
-                "#":             st.column_config.NumberColumn("#", width="small", format="%d"),
-                "Código":        st.column_config.TextColumn("Código", width="small"),
-                "Eventos s/rep.":st.column_config.NumberColumn(
-                    "Eventos s/rep.", help="Días con recarga pero sin reporte registrado"
-                ),
-                "Racha máx. (d)":st.column_config.NumberColumn(
-                    "Racha máx.", help="Días consecutivos sin reporte en el historial"
-                ),
-                "Severidad":     st.column_config.TextColumn(
-                    "Severidad",
-                    help="CRITICO ≥5 eventos · ALERTA 3-4 · EVENTO PUNTUAL 1-2"
-                ),
-            },
-        )
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # SECCIÓN 3 — TOP 10 MÁS PROBLEMÁTICAS
-    # ─────────────────────────────────────────────────────────────────────────
-    if not _df_patron.empty:
-        _top10 = _df_patron.head(10)[
-            ["_COD","EQUIPO_FAMILIA","EVENTOS","LITROS_SF","RACHA_MAX","SEVERIDAD"]
-        ].rename(columns={
-            "_COD":          "Código",
-            "EQUIPO_FAMILIA":"Familia",
-            "EVENTOS":       "Eventos",
-            "LITROS_SF":     "Litros sin rep.",
-            "RACHA_MAX":     "Racha máx.",
-            "SEVERIDAD":     "Severidad",
-        }).copy()
-
-        st.markdown(
-            '<div class="seccion">'
-            '<div class="seccion-titulo">🏆 Top 10 — máquinas más problemáticas</div>',
-            unsafe_allow_html=True,
-        )
-
-        # Gráfico de barras: top 10 por eventos
-        _fig_top = go.Figure(go.Bar(
-            x=_top10["Eventos"],
-            y=_top10["Código"],
-            orientation="h",
-            marker_color=[
-                "#B91C1C" if s == "CRITICO"
-                else "#92400E" if s == "ALERTA"
-                else "#1E40AF"
-                for s in _top10["Severidad"]
-            ],
-            text=_top10["Eventos"],
-            textposition="outside",
-        ))
-        _fig_top.update_layout(
-            height=min(50 * len(_top10) + 60, 360),
-            margin=dict(l=0, r=30, t=8, b=0),
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            xaxis=dict(showgrid=True, gridcolor="#F1F5F9",
-                       title="Eventos sin reporte", tickfont=dict(size=10)),
-            yaxis=dict(autorange="reversed", tickfont=dict(size=11)),
-            showlegend=False,
-        )
-        st.plotly_chart(_fig_top, use_container_width=True,
-                        config={"displayModeBar": False})
-
-        _top10["Litros sin rep."] = _top10["Litros sin rep."].apply(
-            lambda x: f"{x:,.0f} L" if x > 0 else "—"
-        )
-        st.dataframe(
-            _top10.style.map(_color_sev, subset=["Severidad"]),
-            use_container_width=True,
-            hide_index=True,
-            height=min(40 * len(_top10) + 42, 460),
-        )
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # SECCIÓN 4 — CONTROL BASE (máquinas sin reporte)
-    # ─────────────────────────────────────────────────────────────────────────
+    # ── Filtros ───────────────────────────────────────────────────────────────
     st.markdown('<div class="seccion">', unsafe_allow_html=True)
-    _rf1, _rf2, _rf3 = st.columns([2, 2, 3])
-    with _rf1:
-        _fam_opts = ["Todas"] + sorted(_df_ctrl["EQUIPO_FAMILIA"].dropna().unique().tolist())
-        _fam_rep  = st.selectbox("Familia", _fam_opts, key="rep_fam")
-    with _rf2:
-        _niv_opts = ["Todos", "CRITICO", "SEGUIMIENTO"]
-        _niv_rep  = st.selectbox("Nivel", _niv_opts, key="rep_niv")
-    with _rf3:
-        _q_rep = st.text_input("🔎 Buscar código", placeholder="CT-14, EX-07…", key="rep_q")
+    _fc1, _fc2, _fc3 = st.columns([2, 2, 3])
+    with _fc1:
+        _fam_r = st.selectbox(
+            "Familia",
+            ["Todas"] + sorted(_df_ctrl["EQUIPO_FAMILIA"].dropna().unique().tolist()),
+            key="r_fam",
+        )
+    with _fc2:
+        _niv_r = st.selectbox(
+            "Nivel",
+            ["Todos", "CRITICO", "SEGUIMIENTO"],
+            key="r_niv",
+        )
+    with _fc3:
+        _q_r = st.text_input("🔎 Buscar código",
+                             placeholder="CT-14, EX-07…", key="r_q")
     st.markdown("</div>", unsafe_allow_html=True)
 
-    _df_show = _df_ctrl.copy()
-    if _fam_rep != "Todas":
-        _df_show = _df_show[_df_show["EQUIPO_FAMILIA"] == _fam_rep]
-    if _niv_rep != "Todos":
-        _df_show = _df_show[_df_show["NIVEL"] == _niv_rep]
-    if _q_rep.strip():
-        _df_show = _df_show[
-            _df_show["_COD"].astype(str).str.upper()
-            .str.contains(_q_rep.strip().upper(), na=False)
+    # Aplicar filtros
+    _df_f = _df_ctrl.copy()
+    if _fam_r != "Todas":
+        _df_f = _df_f[_df_f["EQUIPO_FAMILIA"] == _fam_r]
+    if _niv_r != "Todos":
+        _df_f = _df_f[_df_f["NIVEL"] == _niv_r]
+    if _q_r.strip():
+        _df_f = _df_f[
+            _df_f["_COD"].astype(str).str.upper()
+            .str.contains(_q_r.strip().upper(), na=False)
         ]
 
-    st.markdown(
-        f'<div class="seccion"><div class="seccion-titulo">'
-        f'Control de reportes — {len(_df_show)} máquinas'
-        f'<span style="font-size:11px;color:var(--texto-3);font-weight:400;margin-left:8px">'
-        f'Referencia: {_fecha_max}'
-        f'</span></div>',
-        unsafe_allow_html=True,
-    )
+    # ── Tabla principal ───────────────────────────────────────────────────────
+    # Preparar vista (sin columnas internas)
+    _vista = _df_f[[
+        "#", "_COD", "EQUIPO_FAMILIA", "TIPO_MAQUINA",
+        "ESTADO", "ULT_REPORTE", "DIAS_SR",
+    ]].rename(columns={
+        "_COD":          "Código",
+        "EQUIPO_FAMILIA":"Familia",
+        "TIPO_MAQUINA":  "Tipo",
+        "ESTADO":        "Estado",
+        "ULT_REPORTE":   "Último reporte",
+        "DIAS_SR":       "Días s/rep.",
+    }).copy()
 
-    def _color_dias(val):
+    def _col_dias(val):
         try:
             v = int(val)
         except (TypeError, ValueError):
             return ""
+        if v >= 999:
+            return "background-color:#FEE2E2;color:#991B1B;font-weight:700"
         if v >= 5:
             return "background-color:#FEE2E2;color:#B91C1C;font-weight:700"
         if v >= 1:
             return "background-color:#FEF3C7;color:#92400E;font-weight:700"
         return ""
 
-    _vista_ctrl = _df_show[[
-        "#","_COD","EQUIPO_FAMILIA","TIPO_MAQUINA","ESTADO","ULT_REPORTE","DIAS_SR","NIVEL"
-    ]].rename(columns={
-        "_COD":"Código","EQUIPO_FAMILIA":"Familia","TIPO_MAQUINA":"Tipo",
-        "ESTADO":"Estado","ULT_REPORTE":"Último reporte",
-        "DIAS_SR":"Días s/rep.","NIVEL":"Nivel",
-    })
+    st.markdown(
+        f'<div class="seccion"><div class="seccion-titulo">'
+        f'Mostrando <b>{len(_vista)}</b> de {len(_df_ctrl)} máquinas'
+        f'<span style="font-size:11px;color:var(--texto-3);font-weight:400;'
+        f'margin-left:8px">Referencia: {_fecha_max} '
+        f'· Haz clic en una fila para ver detalle</span></div>',
+        unsafe_allow_html=True,
+    )
 
-    st.dataframe(
-        _vista_ctrl.style.map(_color_dias, subset=["Días s/rep."]),
+    _ev_rep = st.dataframe(
+        _vista.style.map(_col_dias, subset=["Días s/rep."]),
         use_container_width=True,
         hide_index=True,
-        height=min(40 * len(_vista_ctrl) + 42, 480),
+        height=min(40 * len(_vista) + 42, 560),
+        on_select="rerun",
+        selection_mode="single-row",
+        key="rep_sel_tbl",
         column_config={
-            "#":           st.column_config.NumberColumn("#", width="small", format="%d"),
-            "Código":      st.column_config.TextColumn("Código", width="small"),
-            "Días s/rep.": st.column_config.NumberColumn(
-                "Días s/rep.", help="🟡 ≥1 día · 🔴 ≥5 días"
+            "#":             st.column_config.NumberColumn(
+                "#", width="small", format="%d"),
+            "Código":        st.column_config.TextColumn(
+                "Código", width="small"),
+            "Familia":       st.column_config.TextColumn("Familia"),
+            "Tipo":          st.column_config.TextColumn("Tipo"),
+            "Estado":        st.column_config.TextColumn("Estado"),
+            "Último reporte":st.column_config.TextColumn("Último reporte"),
+            "Días s/rep.":   st.column_config.NumberColumn(
+                "Días s/rep.",
+                help="🟡 1-4 días · 🔴 ≥5 días · 🔴🔴 Sin historial (999)",
             ),
         },
     )
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # SECCIÓN 5 — ACTIVIDAD SIN REPORTE (eventos diarios)
-    # ─────────────────────────────────────────────────────────────────────────
-    st.markdown(
-        '<div class="seccion">'
-        '<div class="seccion-titulo">⚠ Actividad sin reporte'
-        '<span style="font-size:11px;color:var(--texto-3);font-weight:400;margin-left:8px">'
-        'Recargas de combustible sin reporte el mismo día'
-        '</span></div>',
-        unsafe_allow_html=True,
-    )
+    # ── Detalle dinámico al seleccionar fila ──────────────────────────────────
+    _sel_rows  = _ev_rep.selection.rows if _ev_rep else []
+    _cod_sel_r = None
 
-    _cod_opts_f = ["Todas"] + sorted(_df_fallas["_COD"].dropna().unique().tolist())
-    _cod_sel_f  = st.selectbox("Filtrar por máquina", _cod_opts_f, key="rep_falla_cod")
+    if _sel_rows:
+        _idx_r    = _sel_rows[0]
+        _fila_r   = _vista.iloc[_idx_r]
+        _cod_sel_r = _fila_r["Código"]
+        _dias_r    = int(_fila_r["Días s/rep."])
+        _ult_r     = _fila_r["Último reporte"]
+        _est_r     = _fila_r["Estado"]
+        _fam_r_d   = _fila_r["Familia"]
 
-    _df_f_show = _df_fallas.copy()
-    if _cod_sel_f != "Todas":
-        _df_f_show = _df_f_show[_df_f_show["_COD"] == _cod_sel_f]
+        # Obtener ID_MAQUINA para cruzar con historial
+        _id_r = next(
+            (k for k, v in _mapa_cod.items() if v == _cod_sel_r), None
+        )
 
-    _vista_f = _df_f_show[[
-        "_COD","FECHA_DIA","LITROS","REPORTO","FALLA_REPORTE"
-    ]].rename(columns={
-        "_COD":"Código","FECHA_DIA":"Fecha","LITROS":"Litros",
-        "REPORTO":"¿Reportó?","FALLA_REPORTE":"⚠ Falla",
-    })
-    _vista_f["¿Reportó?"] = _vista_f["¿Reportó?"].map({1:"✅ Sí", 0:"❌ No"})
-    _vista_f["⚠ Falla"]   = _vista_f["⚠ Falla"].map({True:"⚠ FALLA", False:"OK"})
+        # ── 1. ALERTAS ────────────────────────────────────────────────────────
+        if _dias_r >= 5:
+            st.error(
+                f"🚨 **{_cod_sel_r}** lleva **{_dias_r} días** sin reporte — "
+                f"máquina crítica."
+            )
 
-    st.dataframe(
-        _vista_f,
-        use_container_width=True,
-        hide_index=True,
-        height=min(40 * len(_vista_f) + 42, 380),
-        column_config={
-            "Código": st.column_config.TextColumn("Código", width="small"),
-            "Litros": st.column_config.NumberColumn("Litros", format="%.0f L"),
-            "⚠ Falla": st.column_config.TextColumn(
-                "⚠ Falla",
-                help="FALLA = hubo recarga pero no se registró reporte ese día"
-            ),
-        },
-    )
-    st.markdown("</div>", unsafe_allow_html=True)
+        # Fallas de esta máquina
+        _fallas_m = (
+            _df_fallas[(_df_fallas["_COD"] == _cod_sel_r) &
+                       _df_fallas["FALLA_REPORTE"]]
+            if not _df_fallas.empty else pd.DataFrame()
+        )
+        if not _fallas_m.empty:
+            st.warning(
+                f"⚠ **{_cod_sel_r}** tiene **{len(_fallas_m)} evento(s)** "
+                f"con actividad sin reporte registrado "
+                f"({_fallas_m['LITROS'].sum():,.0f} L sin respaldo)."
+            )
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # SECCIÓN 6 — DRILL-DOWN por máquina
-    # ─────────────────────────────────────────────────────────────────────────
-    st.markdown(
-        '<div class="seccion">'
-        '<div class="seccion-titulo">🔍 Análisis individual — historial reciente</div>',
-        unsafe_allow_html=True,
-    )
+        # ── 2. TARJETA DE DETALLE ─────────────────────────────────────────────
+        # Construir HTML completo en Python (evita bug de st.markdown + indentación)
+        import streamlit.components.v1 as _stcr
 
-    _cod_drill_opts = sorted(_df_histo["_COD"].dropna().unique().tolist())
-    _cod_drill = st.selectbox("Seleccionar máquina", _cod_drill_opts, key="rep_drill_cod")
+        # Colores según días
+        if _dias_r >= 5:
+            _hdr_c = "#7F1D1D"; _badge_bg = "#FEE2E2"
+            _badge_cl = "#B91C1C"; _badge_txt = "CRÍTICA"
+        elif _dias_r >= 1:
+            _hdr_c = "#78350F"; _badge_bg = "#FEF3C7"
+            _badge_cl = "#92400E"; _badge_txt = "SEGUIMIENTO"
+        else:
+            _hdr_c = "#065F46"; _badge_bg = "#D1FAE5"
+            _badge_cl = "#065F46"; _badge_txt = "AL DÍA"
 
-    if _cod_drill:
-        _id_drill = next((k for k, v in _mapa_cod.items() if v == _cod_drill), None)
-        if _id_drill:
-            _histo_m = (
-                _df_histo[_df_histo["ID_MAQUINA"] == _id_drill]
+        # Historial 10 días de esta máquina
+        _hist_m = pd.DataFrame()
+        if _id_r:
+            _hist_m = (
+                _df_histo[_df_histo["ID_MAQUINA"] == _id_r]
                 .sort_values("FECHA_DIA", ascending=False)
-                .head(30).copy()
-            )
-            if not _histo_m.empty:
-                # KPIs
-                _d1, _d2, _d3, _d4 = st.columns(4)
-                _d1.metric("Días con reporte (30d)", int(_histo_m["REPORTO"].sum()))
-                _d2.metric("Días con recarga (30d)", int((_histo_m["LITROS"] > 0).sum()))
-                _d3.metric("Horas totales (30d)",    f"{_histo_m['HRS'].sum():,.0f}")
-                _d4.metric("Litros totales (30d)",   f"{_histo_m['LITROS'].sum():,.0f}")
-
-                # Racha actual
-                _histo_ord = _histo_m.sort_values("FECHA_DIA")
-                _dias_consec = 0
-                for _, _frow in _histo_ord.iloc[::-1].iterrows():
-                    if _frow["REPORTO"] == 0:
-                        _dias_consec += 1
-                    else:
-                        break
-
-                # Info del patrón para esta máquina
-                _pat_row = _df_patron[_df_patron["_COD"] == _cod_drill]
-                if not _pat_row.empty:
-                    _ev_m = int(_pat_row["EVENTOS"].iloc[0])
-                    _sev_m = _pat_row["SEVERIDAD"].iloc[0]
-                    _rm    = int(_pat_row["RACHA_MAX"].iloc[0])
-                    _lit_m = float(_pat_row["LITROS_SF"].iloc[0])
-                    st.markdown(
-                        f'<div style="background:#FEF9C3;border-left:4px solid #F59E0B;'
-                        f'border-radius:0 8px 8px 0;padding:10px 16px;margin-bottom:10px;'
-                        f'font-size:13px;color:#78350F">'
-                        f'Patrón detectado — <b>{_ev_m} eventos</b> sin reporte · '
-                        f'Racha máx: <b>{_rm}d</b> · '
-                        f'Litros sin respaldo: <b>{_lit_m:,.0f} L</b> · '
-                        f'Severidad: <b>{_sev_m}</b>'
-                        f'</div>',
-                        unsafe_allow_html=True,
-                    )
-
-                if _dias_consec >= 3:
-                    st.error(
-                        f"🚨 **{_cod_drill}** lleva **{_dias_consec} días consecutivos** "
-                        f"sin reporte — requiere atención inmediata."
-                    )
-                elif _dias_consec >= 2:
-                    st.warning(
-                        f"⚠ **{_cod_drill}** lleva **{_dias_consec} días consecutivos** "
-                        f"sin reporte."
-                    )
-
-                # Tabla últimos 10 días
-                st.markdown("**Últimos 10 días:**")
-                _ult10 = _histo_m.head(10).copy()
-                _vista_drill = _ult10[[
-                    "FECHA_DIA","REPORTO","HRS","LITROS"
-                ]].rename(columns={
-                    "FECHA_DIA":"Fecha","REPORTO":"Reportó","HRS":"Horas","LITROS":"Litros"
-                })
-                _vista_drill["Reportó"] = _vista_drill["Reportó"].map({1:"✅ Sí", 0:"❌ No"})
-                _vista_drill["Horas"]   = _vista_drill["Horas"].apply(
-                    lambda x: f"{x:,.1f}" if x > 0 else "—"
-                )
-                _vista_drill["Litros"]  = _vista_drill["Litros"].apply(
-                    lambda x: f"{x:,.0f} L" if x > 0 else "—"
-                )
-                st.dataframe(_vista_drill, use_container_width=True,
-                             hide_index=True, height=min(40*len(_vista_drill)+42, 460))
-
-                # Gráfico
-                _histo_plot = _histo_m.sort_values("FECHA_DIA").copy()
-                _histo_plot["FECHA"] = pd.to_datetime(_histo_plot["FECHA_DIA"])
-                _fig_d = go.Figure()
-                _fig_d.add_trace(go.Bar(
-                    x=_histo_plot["FECHA"], y=_histo_plot["LITROS"],
-                    name="Litros recarga", marker_color="#F59E0B",
-                    opacity=0.65, yaxis="y2",
-                ))
-                _fig_d.add_trace(go.Scatter(
-                    x=_histo_plot["FECHA"],
-                    y=_histo_plot["REPORTO"].astype(float),
-                    mode="lines+markers", name="Reportó (1=Sí, 0=No)",
-                    line=dict(color="#10B981", width=2),
-                    marker=dict(
-                        size=10,
-                        color=_histo_plot["REPORTO"].apply(
-                            lambda v: "#10B981" if v == 1 else "#EF4444"
-                        ),
-                        line=dict(width=1, color="#fff"),
-                    ),
-                ))
-                _fig_d.update_layout(
-                    height=260, margin=dict(l=0,r=8,t=24,b=0),
-                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02),
-                    xaxis=dict(showgrid=False, tickfont=dict(size=10)),
-                    yaxis=dict(title="Reportó", range=[-0.2, 1.5],
-                               tickvals=[0,1], ticktext=["No","Sí"],
-                               gridcolor="#F1F5F9", tickfont=dict(size=10)),
-                    yaxis2=dict(title="Litros", overlaying="y", side="right",
-                                tickfont=dict(size=10), showgrid=False),
-                )
-                st.plotly_chart(_fig_d, use_container_width=True,
-                                config={"displayModeBar": False})
-            else:
-                st.info(f"No hay historial disponible para {_cod_drill}.")
-
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # SECCIÓN 7 — EXPORTAR
-    # ─────────────────────────────────────────────────────────────────────────
-    _rexp1, _rexp2, _rexp3 = st.columns(3)
-    with _rexp1:
-        st.download_button(
-            "⬇ Control reportes (CSV)",
-            _df_show[[
-                "_COD","EQUIPO_FAMILIA","TIPO_MAQUINA","ESTADO","ULT_REPORTE","DIAS_SR","NIVEL"
-            ]].rename(columns={
-                "_COD":"Código","EQUIPO_FAMILIA":"Familia","TIPO_MAQUINA":"Tipo",
-                "ESTADO":"Estado","ULT_REPORTE":"Último reporte",
-                "DIAS_SR":"Días sin reporte","NIVEL":"Nivel",
-            }).to_csv(index=False).encode("utf-8-sig"),
-            "control_reportes.csv","text/csv", use_container_width=True,
-        )
-    with _rexp2:
-        st.download_button(
-            "⬇ Actividad sin reporte (CSV)",
-            _df_f_show[[
-                "_COD","FECHA_DIA","LITROS","REPORTO","FALLA_REPORTE"
-            ]].rename(columns={
-                "_COD":"Código","FECHA_DIA":"Fecha","LITROS":"Litros",
-                "REPORTO":"Reportó","FALLA_REPORTE":"Falla reporte",
-            }).to_csv(index=False).encode("utf-8-sig"),
-            "actividad_sin_reporte.csv","text/csv", use_container_width=True,
-        )
-    with _rexp3:
-        if not _df_patron.empty:
-            st.download_button(
-                "⬇ Máquinas sin control (CSV)",
-                _df_patron[[
-                    "_COD","EQUIPO_FAMILIA","EVENTOS","LITROS_SF","RACHA_MAX","SEVERIDAD"
-                ]].rename(columns={
-                    "_COD":"Código","EQUIPO_FAMILIA":"Familia",
-                    "EVENTOS":"Eventos s/rep.","LITROS_SF":"Litros sin rep.",
-                    "RACHA_MAX":"Racha máxima","SEVERIDAD":"Severidad",
-                }).to_csv(index=False).encode("utf-8-sig"),
-                "maquinas_sin_control.csv","text/csv", use_container_width=True,
+                .head(10)
+                .copy()
             )
 
+        # Construir filas de historial para HTML
+        _hist_rows_html = ""
+        if not _hist_m.empty:
+            for _, _hr in _hist_m.iterrows():
+                _rep_icon = "✅" if _hr["REPORTO"] == 1 else "❌"
+                _lit_txt  = f"{_hr['LITROS']:,.0f} L" if _hr["LITROS"] > 0 else "—"
+                _hrs_txt  = f"{_hr['HRS']:,.1f}" if _hr["HRS"] > 0 else "—"
+                _bg       = "" if _hr["REPORTO"] == 1 else "background:#FEF2F2;"
+                _hist_rows_html += (
+                    f"<tr style='{_bg}'>"
+                    f"<td style='padding:4px 8px;font-size:12px;'>{_hr['FECHA_DIA']}</td>"
+                    f"<td style='padding:4px 8px;font-size:13px;text-align:center;'>{_rep_icon}</td>"
+                    f"<td style='padding:4px 8px;font-size:12px;text-align:right;'>{_hrs_txt}</td>"
+                    f"<td style='padding:4px 8px;font-size:12px;text-align:right;'>{_lit_txt}</td>"
+                    f"</tr>"
+                )
+        else:
+            _hist_rows_html = (
+                "<tr><td colspan='4' style='text-align:center;padding:12px;"
+                "color:#94A3B8;font-size:12px;'>Sin historial disponible</td></tr>"
+            )
 
+        # Construir filas de actividad sin reporte para HTML
+        _falla_rows_html = ""
+        if not _fallas_m.empty:
+            for _, _fr in _fallas_m.iterrows():
+                _falla_rows_html += (
+                    f"<tr style='background:#FEF2F2;'>"
+                    f"<td style='padding:4px 8px;font-size:12px;'>{_fr['FECHA_DIA']}</td>"
+                    f"<td style='padding:4px 8px;font-size:12px;text-align:right;'>"
+                    f"{_fr['LITROS']:,.0f} L</td>"
+                    f"<td style='padding:4px 8px;font-size:12px;text-align:center;color:#B91C1C;"
+                    f"font-weight:700;'>⚠ SIN REPORTE</td>"
+                    f"</tr>"
+                )
 
-# ════════════════════════════════════════════════════════════
+        # Altura dinámica
+        _n_hist  = max(len(_hist_m), 1)
+        _n_falla = len(_fallas_m)
+        _modal_h = 220 + (_n_hist * 30) + (130 if _n_falla > 0 else 0) + (_n_falla * 28)
+
+        _html_r = (
+            "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+            "<style>*{box-sizing:border-box;margin:0;padding:0;}"
+            "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;"
+            "background:transparent;padding:4px;}"
+            "table{width:100%;border-collapse:collapse;}"
+            "th{font-size:10.5px;font-weight:700;text-transform:uppercase;"
+            "letter-spacing:.05em;color:#94A3B8;padding:4px 8px;text-align:left;"
+            "border-bottom:1px solid #E2E8F0;}"
+            ".sect{font-size:10.5px;font-weight:700;text-transform:uppercase;"
+            "letter-spacing:.07em;color:#94A3B8;margin-bottom:8px;}"
+            "</style></head><body>"
+            # Outer card
+            "<div style='background:#F8FAFC;border:1px solid #E2E8F0;border-radius:12px;"
+            "overflow:hidden;box-shadow:0 3px 14px rgba(0,0,0,.07);'>"
+            # Header
+            f"<div style='background:{_hdr_c};padding:13px 18px;"
+            "display:flex;justify-content:space-between;align-items:center;'>"
+            f"<div style='font-size:16px;font-weight:800;color:#fff;'>{_cod_sel_r} — {_fam_r_d}</div>"
+            f"<span style='padding:3px 10px;background:{_badge_bg};color:{_badge_cl};"
+            f"border-radius:20px;font-size:10.5px;font-weight:700;'>{_badge_txt}</span>"
+            "</div>"
+            # Body: 2 col grid
+            "<div style='display:grid;grid-template-columns:1fr 1fr;'>"
+            # Left col: resumen
+            "<div style='padding:14px 16px;border-right:1px solid #E2E8F0;'>"
+            "<div class='sect'>📋 Resumen</div>"
+            f"<div style='display:flex;justify-content:space-between;padding:4px 0;"
+            f"border-bottom:1px solid #F1F5F9;font-size:12.5px;'>"
+            f"<span style='color:#64748B;'>Código</span>"
+            f"<span style='font-weight:600;'>{_cod_sel_r}</span></div>"
+            f"<div style='display:flex;justify-content:space-between;padding:4px 0;"
+            f"border-bottom:1px solid #F1F5F9;font-size:12.5px;'>"
+            f"<span style='color:#64748B;'>Estado</span>"
+            f"<span style='font-weight:600;'>{_est_r}</span></div>"
+            f"<div style='display:flex;justify-content:space-between;padding:4px 0;"
+            f"border-bottom:1px solid #F1F5F9;font-size:12.5px;'>"
+            f"<span style='color:#64748B;'>Último reporte</span>"
+            f"<span style='font-weight:600;'>{_ult_r}</span></div>"
+            f"<div style='display:flex;justify-content:space-between;padding:4px 0;"
+            f"font-size:12.5px;'>"
+            f"<span style='color:#64748B;'>Días sin reporte</span>"
+            f"<span style='font-weight:700;color:{"#B91C1C" if _dias_r >= 5 else "#92400E"};'>"
+            f"{_dias_r} d</span></div>"
+            # Fallas (solo si existen)
+            + (
+                f"<div style='margin-top:14px;' class='sect'>⚠ Actividad sin reporte</div>"
+                f"<table><thead><tr>"
+                f"<th>Fecha</th><th style='text-align:right;'>Litros</th><th style='text-align:center;'>Estado</th>"
+                f"</tr></thead><tbody>{_falla_rows_html}</tbody></table>"
+                if _n_falla > 0
+                else "<div style='margin-top:14px;color:#94A3B8;font-size:12px;'>"
+                     "Sin actividad sin reporte registrada ✓</div>"
+            ) +
+            "</div>"
+            # Right col: historial 10 días
+            "<div style='padding:14px 16px;'>"
+            "<div class='sect'>📅 Historial últimos 10 días</div>"
+            "<table><thead><tr>"
+            "<th>Fecha</th><th style='text-align:center;'>Reportó</th>"
+            "<th style='text-align:right;'>Horas</th><th style='text-align:right;'>Litros</th>"
+            "</tr></thead><tbody>"
+            f"{_hist_rows_html}"
+            "</tbody></table>"
+            "</div>"
+            "</div></div>"  # close grid + card
+            "</body></html>"
+        )
+
+        _stcr.html(_html_r, height=_modal_h, scrolling=True)
+
+    else:
+        st.caption("💡 Haz clic en una fila para ver el detalle de la máquina.")
+
+    # ── Exportar ──────────────────────────────────────────────────────────────
+    st.download_button(
+        "⬇ Exportar tabla (CSV)",
+        _df_f[[
+            "_COD","EQUIPO_FAMILIA","TIPO_MAQUINA","ESTADO","ULT_REPORTE","DIAS_SR","NIVEL"
+        ]].rename(columns={
+            "_COD":"Código","EQUIPO_FAMILIA":"Familia","TIPO_MAQUINA":"Tipo",
+            "ESTADO":"Estado","ULT_REPORTE":"Último reporte",
+            "DIAS_SR":"Días sin reporte","NIVEL":"Nivel",
+        }).to_csv(index=False).encode("utf-8-sig"),
+        "control_reportes.csv", "text/csv",
+    )
+
 # TAB 6 — ALERTAS
 # ════════════════════════════════════════════════════════════
 with tab_alertas:
