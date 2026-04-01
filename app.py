@@ -219,6 +219,39 @@ def procesar(bytes_archivo: bytes, nombre: str) -> dict:
     return {"datos": datos, "metricas": metricas, "alertas": alertas}
 
 
+# ── Funciones auxiliares de normalización de obras ───────────────────────────
+# CRÍTICO: deben estar al nivel de módulo, NO dentro de funciones cacheadas.
+# @st.cache_data serializa su retorno con pickle → las funciones locales
+# (closures) lanzan UnserializableReturnValueError.
+
+def _es_id_obra(x) -> bool:
+    """True si x es un ID técnico de obra: sin espacios, ≤10 chars, alfanumérico."""
+    if pd.isna(x):
+        return False
+    s = str(x).strip()
+    return len(s) <= 10 and " " not in s and bool(re.match(r"^[a-zA-Z0-9]+$", s))
+
+
+def _norm_obra_texto(texto) -> str:
+    """Normaliza nombre de obra: UPPER + strip + colapso de espacios dobles."""
+    if pd.isna(texto) or not str(texto).strip():
+        return ""
+    return re.sub(r"\s+", " ", str(texto).strip().upper())
+
+
+def _obra_de_recarga_norm(obra_id, mapa: dict) -> str:
+    """
+    Convierte OBRA_ID de recarga → nombre normalizado.
+    ID válido en mapa → usa nombre real.  Texto directo → normaliza.
+    """
+    if pd.isna(obra_id):
+        return ""
+    s = str(obra_id).strip()
+    if _es_id_obra(s) and s in mapa:
+        return _norm_obra_texto(mapa[s])
+    return _norm_obra_texto(s)
+
+
 @st.cache_data(show_spinner=False)
 def _calc_hist_maquinas(archivo_bytes: bytes, fecha_fin_str: str) -> dict:
     """
@@ -260,27 +293,12 @@ def _calc_hist_maquinas(archivo_bytes: bytes, fecha_fin_str: str) -> dict:
     except Exception:
         _df_ob = pd.DataFrame(columns=["ID_OBRA","OBRA"])
 
-    def _es_id(x) -> bool:
-        if pd.isna(x): return False
-        s = str(x).strip()
-        return len(s) <= 10 and " " not in s and bool(re.match(r"^[a-zA-Z0-9]+$", s))
-
-    def _norm(t) -> str:
-        if pd.isna(t) or not str(t).strip(): return ""
-        return re.sub(r"\s+", " ", str(t).strip().upper())
-
+    # Usar funciones de módulo (no closures — pickle-safe para @st.cache_data)
     mapa_obras = {
         str(r["ID_OBRA"]).strip(): str(r["OBRA"]).strip()
         for _, r in _df_ob.iterrows()
-        if _es_id(r["ID_OBRA"]) and pd.notna(r["OBRA"])
+        if _es_id_obra(r["ID_OBRA"]) and pd.notna(r["OBRA"])
     }
-
-    def _obra_rec(obra_id) -> str:
-        if pd.isna(obra_id): return ""
-        s = str(obra_id).strip()
-        if _es_id(s) and s in mapa_obras:
-            return _norm(mapa_obras[s])
-        return _norm(s)
 
     # ── 2. Último operador / fecha / obra por máquina ─────────────────────────
     ult_info: dict = {}
@@ -325,16 +343,16 @@ def _calc_hist_maquinas(archivo_bytes: bytes, fecha_fin_str: str) -> dict:
 
     for _mid, _grp in _df_r.dropna(subset=["OBRA_TXT"]).groupby("ID_MAQUINA"):
         hist_comb[_mid] = [
-            (r["FECHAHORA_INICIO"], _norm(r["OBRA_TXT"]), "REP")
+            (r["FECHAHORA_INICIO"], _norm_obra_texto(r["OBRA_TXT"]), "REP")
             for _, r in _grp[["FECHAHORA_INICIO","OBRA_TXT"]].iterrows()
-            if _norm(r["OBRA_TXT"])
+            if _norm_obra_texto(r["OBRA_TXT"])
         ]
 
     _df_c_v = _df_c.dropna(subset=["OBRA_ID","_fecha"])
     for _mid, _grp in _df_c_v.groupby("ID_MAQUINA"):
         _evs = hist_comb.get(_mid, [])
         for _, _row in _grp[["_fecha","OBRA_ID"]].iterrows():
-            _ob = _obra_rec(_row["OBRA_ID"])
+            _ob = _obra_de_recarga_norm(_row["OBRA_ID"], mapa_obras)
             if _ob:
                 _evs.append((_row["_fecha"], _ob, "REC"))
         hist_comb[_mid] = sorted(_evs, key=lambda x: x[0])
@@ -382,9 +400,6 @@ def _calc_hist_maquinas(archivo_bytes: bytes, fecha_fin_str: str) -> dict:
         "mapa_obras":  mapa_obras,
         "hist_rep_ob": hist_rep_ob,
         "hist_rec_ob": hist_rec_ob,
-        "norm_obra":   _norm,
-        "obra_rec":    _obra_rec,
-        "es_id":       _es_id,
     }
 
 
@@ -1305,9 +1320,10 @@ with tab_maq:
     _mapa_obras  = _h["mapa_obras"]
     _hist_rep_ob = _h["hist_rep_ob"]
     _hist_rec_ob = _h["hist_rec_ob"]
-    _norm_obra   = _h["norm_obra"]
-    _obra_de_recarga = _h["obra_rec"]
-    _es_id_valido    = _h["es_id"]
+    # Funciones auxiliares — definidas al nivel de módulo (pickle-safe)
+    _norm_obra       = _norm_obra_texto
+    _obra_de_recarga = lambda oid: _obra_de_recarga_norm(oid, _mapa_obras)
+    _es_id_valido    = _es_id_obra
 
     # ────────────────────────────────────────────────────────────────────────
     # BLOQUE E — DATOS DINÁMICOS (dependen del período seleccionado)
