@@ -252,6 +252,233 @@ def _obra_de_recarga_norm(obra_id, mapa: dict) -> str:
     return _norm_obra_texto(s)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Función cacheada: pestaña Reportes
+# Cache key: archivo_bytes → recalcula solo al cambiar el archivo
+# ─────────────────────────────────────────────────────────────────────────────
+
+# MAQUINAS_BASE: misma lista que tab Máquinas (fuente de verdad)
+_MAQUINAS_BASE_SET = {
+    "C-02","C-04","C-06","C-09","C-12","C-13","C-14","C-15","C-16","C-17","C-18",
+    "C-19","C-20","C-21","C-22","C-23","C-24","C-25","C-26","C-27","C-29","C-30",
+    "C-31","C-35","C-36","C-37","C-38","C-39","C-42","C-43","C-45","C-46","C-47",
+    "C-48","C-49","C-51","C-52","C-53","C-54","C-55","MB-01","CUATRI 01","CUATRI-02",
+    "CA-01","CG-02","CK-03","CM-01","CP-02","CP-03","CP-04","CP-05","CP-06","CP-07",
+    "CP-08","CS-01","CT-03","CT-06","CT-07","CT-10","CT-12","CT-13","CT-14","CT-15",
+    "CT-16","CT-23","CT-24","CT-25","CT-26","CT-27","CT-28","CT-29","CT-30","CT-31",
+    "CT-33","CT-34","CT-35","CT-36","CT-37","CT-38","TC-01","TC-02","TC-03","TC-04",
+    "CI-01","CI-02","CF-03","CF-04","CF-05","CF-06","CF-07","CF-08","CF-09","CF-10",
+    "MC-01","MC-02","MC-03","MC-04","EX-03","EX-06","EX-07","EX-08","EX-09","EX-10",
+    "EX-11","EX-12","EX-13","EX-14","EX-15","EX-16","EX-17","EX-18","EX-19","EX-20",
+    "EX-21","MX-02","MX-03","RX-02","RX-03","RX-04","RX-05","RX-06","RX-07","RX-08",
+    "RXm-09","BD-02","BD-03","T-01","T-02","T-03","T-04","T-05","T-06",
+    "MN-01","MN-02","MN-03","MN-04","GM-01","GM-02","GM-03","GM-04",
+    "P-01","P-02","P-03","P-04","P-220","PH-01","RC-01","RC-02","RL-01","RN-01",
+    "GV-01","TE-01","VH-01","BA-01","BA-02","SE-01",
+    "G-01","G-02","G-03","G-04","G-05","G-06","G-07","G-08","G-09","G-10","G-11",
+}
+
+# Camionetas exentas de reporte operacional
+_FAM_EXENTAS_REP = {"CAMIONETA"}
+
+
+def _limpiar_cod_rep(texto) -> str | None:
+    """Extrae código limpio de CODIGO_MAQUINA (pickle-safe, nivel módulo)."""
+    if pd.isna(texto) or not str(texto).strip():
+        return None
+    s = re.sub(r"^\[+", "", str(texto).strip()).strip()
+    if s.upper().startswith("CUATRI"):
+        m = re.match(r"(CUATRI[\s\-]\d+)", s, re.IGNORECASE)
+        if m:
+            for base in _MAQUINAS_BASE_SET:
+                if base.upper() == m.group(1).upper():
+                    return base
+            return m.group(1)
+        return None
+    m = re.match(r"([A-Za-z]{1,4})-(\d{1,3})", s)
+    return f"{m.group(1)}-{m.group(2)}" if m else None
+
+
+@st.cache_data(show_spinner=False)
+def _calc_reportes(archivo_bytes: bytes) -> dict:
+    """
+    Calcula todos los datos de la pestaña Reportes.
+    Cacheado por archivo_bytes — un solo cómputo por sesión.
+
+    Retorna dict con:
+        df_ctrl    : tabla de control (máquinas sin reporte, días, familia…)
+        df_fallas  : eventos actividad-sin-reporte (FECHA, LITROS, FALLA)
+        df_hist    : historial diario por máquina (FECHA_DIA, ID_MAQUINA, REPORTO, LITROS)
+        mapa_cod   : {ID_MAQUINA → COD limpio}
+        fecha_max  : fecha más reciente de reportes (date)
+    """
+    _xl  = pd.ExcelFile(io.BytesIO(archivo_bytes))
+    _df_r = pd.read_excel(_xl, sheet_name="Query_Contratos_Reportes")
+    _df_c = pd.read_excel(_xl, sheet_name="Query_Recargas_Combustible")
+    _df_m = pd.read_excel(_xl, sheet_name="MAQUINAS")
+
+    # ── Tipos mínimos ─────────────────────────────────────────────────────────
+    _df_r["FECHAHORA_INICIO"] = pd.to_datetime(_df_r["FECHAHORA_INICIO"], errors="coerce")
+    _df_r = _df_r.dropna(subset=["FECHAHORA_INICIO","ID_MAQUINA"])
+    _df_r["FECHA_DIA"] = _df_r["FECHAHORA_INICIO"].dt.normalize()
+
+    _df_c["_FECHA"] = pd.to_datetime(_df_c.get("FECHA", pd.Series()), errors="coerce")
+    _df_c["LITROS"] = pd.to_numeric(_df_c.get("LITROS", pd.Series()), errors="coerce").fillna(0)
+    _df_c["FECHA_DIA"] = _df_c["_FECHA"].dt.normalize()
+
+    # ── Catálogo: solo máquinas de MAQUINAS_BASE, excluyendo camionetas ───────
+    _df_m["_COD"] = _df_m["CODIGO_MAQUINA"].apply(_limpiar_cod_rep)
+    _cat = _df_m[
+        _df_m["_COD"].isin(_MAQUINAS_BASE_SET) &
+        ~_df_m["EQUIPO_FAMILIA"].isin(_FAM_EXENTAS_REP)
+    ][["ID_MAQUINA","_COD","EQUIPO_FAMILIA","TIPO_MAQUINA","ESTADO"]].copy()
+    _cat = _cat.drop_duplicates(subset=["_COD"]).reset_index(drop=True)
+
+    # Mapa ID → código limpio
+    mapa_cod = _cat.set_index("ID_MAQUINA")["_COD"].to_dict()
+
+    # ── BLOQUE 1: días sin reporte ─────────────────────────────────────────────
+    _ult = (
+        _df_r.groupby("ID_MAQUINA")["FECHA_DIA"]
+        .max().dt.date.reset_index()
+        .rename(columns={"FECHA_DIA": "ULT_REPORTE"})
+    )
+    _ctrl = _cat.merge(_ult, on="ID_MAQUINA", how="left")
+
+    # Fecha de referencia: último día con datos en el archivo
+    fecha_max = _df_r["FECHA_DIA"].max().date()
+    _ctrl["DIAS_SR"] = _ctrl["ULT_REPORTE"].apply(
+        lambda d: (fecha_max - d).days if pd.notna(d) else 999
+    )
+    _ctrl = (
+        _ctrl[_ctrl["DIAS_SR"] >= 1]
+        .sort_values("DIAS_SR", ascending=False)
+        .reset_index(drop=True)
+    )
+    _ctrl["#"] = range(1, len(_ctrl) + 1)
+    _ctrl["NIVEL"] = _ctrl["DIAS_SR"].apply(
+        lambda d: "CRITICO" if d >= 5 else ("SEGUIMIENTO" if d >= 1 else "OK")
+    )
+
+    # ── BLOQUE 2: actividad sin reporte ───────────────────────────────────────
+    # Solo máquinas de la base
+    _ids_base = set(_cat["ID_MAQUINA"])
+
+    # Actividad diaria (recargas)
+    _act = (
+        _df_c[_df_c["ID_MAQUINA"].isin(_ids_base)]
+        .groupby(["ID_MAQUINA","FECHA_DIA"])["LITROS"]
+        .sum().reset_index()
+    )
+    _act["TUVO_ACTIVIDAD"] = _act["LITROS"] > 0
+
+    # Reportes diarios
+    _rep_dia = (
+        _df_r[_df_r["ID_MAQUINA"].isin(_ids_base)]
+        .groupby(["ID_MAQUINA","FECHA_DIA"])
+        .size().reset_index(name="N_REP")
+    )
+    _rep_dia["REPORTO"] = (_rep_dia["N_REP"] > 0).astype(int)
+
+    # Merge: actividad vs reportes (LEFT JOIN desde actividad)
+    _fallas = _act.merge(
+        _rep_dia[["ID_MAQUINA","FECHA_DIA","REPORTO"]],
+        on=["ID_MAQUINA","FECHA_DIA"], how="left"
+    )
+    _fallas["REPORTO"]      = _fallas["REPORTO"].fillna(0).astype(int)
+    _fallas["FALLA_REPORTE"] = _fallas["TUVO_ACTIVIDAD"] & (_fallas["REPORTO"] == 0)
+    _fallas["_COD"] = _fallas["ID_MAQUINA"].map(mapa_cod)
+    _fallas["FECHA_DIA"] = pd.to_datetime(_fallas["FECHA_DIA"]).dt.date
+    # Solo filas con actividad real
+    _fallas = _fallas[_fallas["TUVO_ACTIVIDAD"]].sort_values(
+        ["FALLA_REPORTE","FECHA_DIA"], ascending=[False, False]
+    ).reset_index(drop=True)
+
+    # ── BLOQUE 3: historial diario completo (para drill-down) ─────────────────
+    _histo_r = (
+        _df_r[_df_r["ID_MAQUINA"].isin(_ids_base)]
+        .groupby(["ID_MAQUINA","FECHA_DIA"])
+        .agg(N_REP=("ID_MAQUINA","count"), HRS=("HORAS_TRABAJADAS","sum"))
+        .reset_index()
+    )
+    _histo_r["REPORTO"] = 1
+
+    _histo_c = (
+        _df_c[_df_c["ID_MAQUINA"].isin(_ids_base)]
+        .groupby(["ID_MAQUINA","FECHA_DIA"])["LITROS"]
+        .sum().reset_index()
+    )
+
+    _histo = _histo_r.merge(_histo_c, on=["ID_MAQUINA","FECHA_DIA"], how="outer")
+    _histo["REPORTO"] = _histo["REPORTO"].fillna(0).astype(int)
+    _histo["LITROS"]  = _histo["LITROS"].fillna(0)
+    _histo["HRS"]     = _histo["HRS"].fillna(0)
+    _histo["FECHA_DIA"] = pd.to_datetime(_histo["FECHA_DIA"]).dt.date
+    _histo["_COD"] = _histo["ID_MAQUINA"].map(mapa_cod)
+    _histo = _histo.sort_values(["ID_MAQUINA","FECHA_DIA"]).reset_index(drop=True)
+
+    # ── BLOQUE 4 (NUEVO): patrón por máquina ─────────────────────────────────
+    # Agrupación de FALLA_REPORTE por máquina para detectar patrones recurrentes.
+    # Vectorizado, sin loops — reutiliza _fallas ya calculado.
+    _solo_fallas = _fallas[_fallas["FALLA_REPORTE"]]
+
+    if not _solo_fallas.empty:
+        _patron = (
+            _solo_fallas.groupby("ID_MAQUINA")
+            .agg(
+                EVENTOS     = ("FALLA_REPORTE", "sum"),
+                LITROS_SF   = ("LITROS",        "sum"),
+            )
+            .reset_index()
+        )
+        _patron["_COD"] = _patron["ID_MAQUINA"].map(mapa_cod)
+        # Racha máxima sin reporte (días consecutivos sin reportar, contada
+        # desde el historial completo — usando _histo que ya existe)
+        _rachas = {}
+        for _mid, _grp in _histo.groupby("ID_MAQUINA"):
+            _seq = _grp.sort_values("FECHA_DIA")["REPORTO"].tolist()
+            _max_r = _cur_r = 0
+            for _v in _seq:
+                if _v == 0:
+                    _cur_r += 1
+                    _max_r = max(_max_r, _cur_r)
+                else:
+                    _cur_r = 0
+            _rachas[_mid] = _max_r
+        _patron["RACHA_MAX"] = _patron["ID_MAQUINA"].map(_rachas).fillna(0).astype(int)
+        _patron["SEVERIDAD"] = _patron["EVENTOS"].apply(
+            lambda e: "CRITICO" if e >= 5 else ("ALERTA" if e >= 3 else "EVENTO PUNTUAL")
+        )
+        _patron = (
+            _patron.sort_values("EVENTOS", ascending=False)
+            .reset_index(drop=True)
+        )
+        _patron["#"] = range(1, len(_patron) + 1)
+        # Merge con catálogo para añadir familia/tipo
+        _patron = _patron.merge(
+            _cat[["ID_MAQUINA","EQUIPO_FAMILIA","TIPO_MAQUINA"]],
+            on="ID_MAQUINA", how="left"
+        )
+    else:
+        _patron = pd.DataFrame(columns=[
+            "ID_MAQUINA","_COD","EVENTOS","LITROS_SF",
+            "RACHA_MAX","SEVERIDAD","#","EQUIPO_FAMILIA","TIPO_MAQUINA"
+        ])
+
+    # Total litros sin respaldo (KPI de impacto de negocio)
+    litros_sin_respaldo = float(_solo_fallas["LITROS"].sum()) if not _solo_fallas.empty else 0.0
+
+    return {
+        "df_ctrl":             _ctrl,
+        "df_fallas":           _fallas,
+        "df_histo":            _histo,
+        "df_patron":           _patron,
+        "mapa_cod":            mapa_cod,
+        "fecha_max":           fecha_max,
+        "litros_sin_respaldo": litros_sin_respaldo,
+    }
+
+
 @st.cache_data(show_spinner=False)
 def _calc_hist_maquinas(archivo_bytes: bytes, fecha_fin_str: str) -> dict:
     """
@@ -533,11 +760,12 @@ n_alertas    = len(alertas) if not alertas.empty else 0
 n_dias       = (fecha_fin - fecha_ini).days + 1
 
 # ── PESTAÑAS ─────────────────────────────────────────────────────────────────
-tab_act, tab_maq, tab_ops, tab_comb, tab_alertas = st.tabs([
+tab_act, tab_maq, tab_ops, tab_comb, tab_rep, tab_alertas = st.tabs([
     "🎯  Vista Ejecutiva",
     "🚜  Máquinas",
     "👷  Operadores",
     "⛽  Combustible",
+    "📋  Reportes",
     f"🚨  Alertas  ({n_alertas})",
 ])
 
@@ -2390,8 +2618,477 @@ with tab_comb:
         st.markdown("</div>", unsafe_allow_html=True)
 
 
+
+
 # ════════════════════════════════════════════════════════════
-# TAB 5 — ALERTAS
+# TAB 5 — REPORTES
+# ════════════════════════════════════════════════════════════
+with tab_rep:
+
+    # ── Cargar datos cacheados ────────────────────────────────────────────────
+    _rp = _calc_reportes(st.session_state["archivo_bytes"])
+    _df_ctrl   = _rp["df_ctrl"].copy()
+    _df_fallas = _rp["df_fallas"].copy()
+    _df_histo  = _rp["df_histo"].copy()
+    _df_patron = _rp["df_patron"].copy()
+    _mapa_cod  = _rp["mapa_cod"]
+    _fecha_max = _rp["fecha_max"]
+    _lsr       = _rp["litros_sin_respaldo"]
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # SECCIÓN 1 — KPIs + ALERTA GLOBAL
+    # ─────────────────────────────────────────────────────────────────────────
+
+    _n_sr     = len(_df_ctrl)
+    _n_crit   = (_df_ctrl["NIVEL"] == "CRITICO").sum()
+    _n_seg    = (_df_ctrl["NIVEL"] == "SEGUIMIENTO").sum()
+    _n_falla  = int(_df_fallas["FALLA_REPORTE"].sum())
+    _n_critp  = (_df_patron["SEVERIDAD"] == "CRITICO").sum()   if not _df_patron.empty else 0
+    _n_rachaG = int(_df_patron["RACHA_MAX"].max())              if not _df_patron.empty else 0
+
+    # KPI: litros sin respaldo formateado
+    _lsr_fmt = f"{_lsr:,.0f} L"
+
+    st.markdown(f"""
+    <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap">
+        <div style="background:#B91C1C;color:#fff;border-radius:8px;
+                    padding:10px 20px;text-align:center;min-width:92px">
+            <div style="font-size:22px;font-weight:800">{_n_crit}</div>
+            <div style="font-size:10px;opacity:.85;letter-spacing:.04em">🔴 CRÍTICAS ≥5d</div>
+        </div>
+        <div style="background:#92400E;color:#fff;border-radius:8px;
+                    padding:10px 20px;text-align:center;min-width:92px">
+            <div style="font-size:22px;font-weight:800">{_n_seg}</div>
+            <div style="font-size:10px;opacity:.85;letter-spacing:.04em">🟡 SEGUIMIENTO 1-4d</div>
+        </div>
+        <div style="background:#1E40AF;color:#fff;border-radius:8px;
+                    padding:10px 20px;text-align:center;min-width:92px">
+            <div style="font-size:22px;font-weight:800">{_n_sr}</div>
+            <div style="font-size:10px;opacity:.85;letter-spacing:.04em">TOTAL SIN REPORTE</div>
+        </div>
+        <div style="background:#6D28D9;color:#fff;border-radius:8px;
+                    padding:10px 20px;text-align:center;min-width:92px">
+            <div style="font-size:22px;font-weight:800">{_n_falla}</div>
+            <div style="font-size:10px;opacity:.85;letter-spacing:.04em">⚠ ACTIVIDAD S/REP.</div>
+        </div>
+        <div style="background:#7C3AED;color:#fff;border-radius:8px;
+                    padding:10px 20px;text-align:center;min-width:110px">
+            <div style="font-size:18px;font-weight:800">{_lsr_fmt}</div>
+            <div style="font-size:10px;opacity:.85;letter-spacing:.04em">⛽ LITROS SIN RESPALDO</div>
+        </div>
+        <div style="background:#374151;color:#fff;border-radius:8px;
+                    padding:10px 20px;text-align:center;min-width:110px">
+            <div style="font-size:17px;font-weight:700">{str(_fecha_max)}</div>
+            <div style="font-size:10px;opacity:.85;letter-spacing:.04em">ÚLTIMO DATO</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Alerta global si hay patrones críticos o rachas largas
+    if _n_critp > 0 or _n_rachaG >= 3:
+        st.error(
+            f"🚨 Se detectaron **{_n_critp}** máquinas operando sin control "
+            f"(actividad sin reporte recurrente) · Racha máxima: **{_n_rachaG} días** consecutivos"
+        )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # SECCIÓN 2 — MÁQUINAS ACTIVAS SIN CONTROL (patrón por máquina)
+    # ─────────────────────────────────────────────────────────────────────────
+    if not _df_patron.empty:
+        st.markdown(
+            '<div class="seccion">'
+            '<div class="seccion-titulo">🔥 Máquinas activas sin control'
+            '<span style="font-size:11px;color:var(--texto-3);font-weight:400;margin-left:8px">'
+            'Ordenadas por eventos de actividad sin reporte · CRITICO ≥5 eventos'
+            '</span></div>',
+            unsafe_allow_html=True,
+        )
+
+        def _color_sev(val):
+            return {
+                "CRITICO":       "background-color:#FEE2E2;color:#B91C1C;font-weight:700",
+                "ALERTA":        "background-color:#FEF3C7;color:#92400E;font-weight:700",
+                "EVENTO PUNTUAL":"background-color:#DBEAFE;color:#1E40AF",
+            }.get(str(val), "")
+
+        _v_patron = _df_patron[[
+            "#","_COD","EQUIPO_FAMILIA","EVENTOS","LITROS_SF","RACHA_MAX","SEVERIDAD"
+        ]].rename(columns={
+            "_COD":          "Código",
+            "EQUIPO_FAMILIA":"Familia",
+            "EVENTOS":       "Eventos s/rep.",
+            "LITROS_SF":     "Litros sin rep.",
+            "RACHA_MAX":     "Racha máx. (d)",
+            "SEVERIDAD":     "Severidad",
+        })
+        _v_patron["Litros sin rep."] = _v_patron["Litros sin rep."].apply(
+            lambda x: f"{x:,.0f} L" if x > 0 else "—"
+        )
+
+        st.dataframe(
+            _v_patron.style.map(_color_sev, subset=["Severidad"]),
+            use_container_width=True,
+            hide_index=True,
+            height=min(40 * len(_v_patron) + 42, 420),
+            column_config={
+                "#":             st.column_config.NumberColumn("#", width="small", format="%d"),
+                "Código":        st.column_config.TextColumn("Código", width="small"),
+                "Eventos s/rep.":st.column_config.NumberColumn(
+                    "Eventos s/rep.", help="Días con recarga pero sin reporte registrado"
+                ),
+                "Racha máx. (d)":st.column_config.NumberColumn(
+                    "Racha máx.", help="Días consecutivos sin reporte en el historial"
+                ),
+                "Severidad":     st.column_config.TextColumn(
+                    "Severidad",
+                    help="CRITICO ≥5 eventos · ALERTA 3-4 · EVENTO PUNTUAL 1-2"
+                ),
+            },
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # SECCIÓN 3 — TOP 10 MÁS PROBLEMÁTICAS
+    # ─────────────────────────────────────────────────────────────────────────
+    if not _df_patron.empty:
+        _top10 = _df_patron.head(10)[
+            ["_COD","EQUIPO_FAMILIA","EVENTOS","LITROS_SF","RACHA_MAX","SEVERIDAD"]
+        ].rename(columns={
+            "_COD":          "Código",
+            "EQUIPO_FAMILIA":"Familia",
+            "EVENTOS":       "Eventos",
+            "LITROS_SF":     "Litros sin rep.",
+            "RACHA_MAX":     "Racha máx.",
+            "SEVERIDAD":     "Severidad",
+        }).copy()
+
+        st.markdown(
+            '<div class="seccion">'
+            '<div class="seccion-titulo">🏆 Top 10 — máquinas más problemáticas</div>',
+            unsafe_allow_html=True,
+        )
+
+        # Gráfico de barras: top 10 por eventos
+        _fig_top = go.Figure(go.Bar(
+            x=_top10["Eventos"],
+            y=_top10["Código"],
+            orientation="h",
+            marker_color=[
+                "#B91C1C" if s == "CRITICO"
+                else "#92400E" if s == "ALERTA"
+                else "#1E40AF"
+                for s in _top10["Severidad"]
+            ],
+            text=_top10["Eventos"],
+            textposition="outside",
+        ))
+        _fig_top.update_layout(
+            height=min(50 * len(_top10) + 60, 360),
+            margin=dict(l=0, r=30, t=8, b=0),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            xaxis=dict(showgrid=True, gridcolor="#F1F5F9",
+                       title="Eventos sin reporte", tickfont=dict(size=10)),
+            yaxis=dict(autorange="reversed", tickfont=dict(size=11)),
+            showlegend=False,
+        )
+        st.plotly_chart(_fig_top, use_container_width=True,
+                        config={"displayModeBar": False})
+
+        _top10["Litros sin rep."] = _top10["Litros sin rep."].apply(
+            lambda x: f"{x:,.0f} L" if x > 0 else "—"
+        )
+        st.dataframe(
+            _top10.style.map(_color_sev, subset=["Severidad"]),
+            use_container_width=True,
+            hide_index=True,
+            height=min(40 * len(_top10) + 42, 460),
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # SECCIÓN 4 — CONTROL BASE (máquinas sin reporte)
+    # ─────────────────────────────────────────────────────────────────────────
+    st.markdown('<div class="seccion">', unsafe_allow_html=True)
+    _rf1, _rf2, _rf3 = st.columns([2, 2, 3])
+    with _rf1:
+        _fam_opts = ["Todas"] + sorted(_df_ctrl["EQUIPO_FAMILIA"].dropna().unique().tolist())
+        _fam_rep  = st.selectbox("Familia", _fam_opts, key="rep_fam")
+    with _rf2:
+        _niv_opts = ["Todos", "CRITICO", "SEGUIMIENTO"]
+        _niv_rep  = st.selectbox("Nivel", _niv_opts, key="rep_niv")
+    with _rf3:
+        _q_rep = st.text_input("🔎 Buscar código", placeholder="CT-14, EX-07…", key="rep_q")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    _df_show = _df_ctrl.copy()
+    if _fam_rep != "Todas":
+        _df_show = _df_show[_df_show["EQUIPO_FAMILIA"] == _fam_rep]
+    if _niv_rep != "Todos":
+        _df_show = _df_show[_df_show["NIVEL"] == _niv_rep]
+    if _q_rep.strip():
+        _df_show = _df_show[
+            _df_show["_COD"].astype(str).str.upper()
+            .str.contains(_q_rep.strip().upper(), na=False)
+        ]
+
+    st.markdown(
+        f'<div class="seccion"><div class="seccion-titulo">'
+        f'Control de reportes — {len(_df_show)} máquinas'
+        f'<span style="font-size:11px;color:var(--texto-3);font-weight:400;margin-left:8px">'
+        f'Referencia: {_fecha_max}'
+        f'</span></div>',
+        unsafe_allow_html=True,
+    )
+
+    def _color_dias(val):
+        try:
+            v = int(val)
+        except (TypeError, ValueError):
+            return ""
+        if v >= 5:
+            return "background-color:#FEE2E2;color:#B91C1C;font-weight:700"
+        if v >= 1:
+            return "background-color:#FEF3C7;color:#92400E;font-weight:700"
+        return ""
+
+    _vista_ctrl = _df_show[[
+        "#","_COD","EQUIPO_FAMILIA","TIPO_MAQUINA","ESTADO","ULT_REPORTE","DIAS_SR","NIVEL"
+    ]].rename(columns={
+        "_COD":"Código","EQUIPO_FAMILIA":"Familia","TIPO_MAQUINA":"Tipo",
+        "ESTADO":"Estado","ULT_REPORTE":"Último reporte",
+        "DIAS_SR":"Días s/rep.","NIVEL":"Nivel",
+    })
+
+    st.dataframe(
+        _vista_ctrl.style.map(_color_dias, subset=["Días s/rep."]),
+        use_container_width=True,
+        hide_index=True,
+        height=min(40 * len(_vista_ctrl) + 42, 480),
+        column_config={
+            "#":           st.column_config.NumberColumn("#", width="small", format="%d"),
+            "Código":      st.column_config.TextColumn("Código", width="small"),
+            "Días s/rep.": st.column_config.NumberColumn(
+                "Días s/rep.", help="🟡 ≥1 día · 🔴 ≥5 días"
+            ),
+        },
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # SECCIÓN 5 — ACTIVIDAD SIN REPORTE (eventos diarios)
+    # ─────────────────────────────────────────────────────────────────────────
+    st.markdown(
+        '<div class="seccion">'
+        '<div class="seccion-titulo">⚠ Actividad sin reporte'
+        '<span style="font-size:11px;color:var(--texto-3);font-weight:400;margin-left:8px">'
+        'Recargas de combustible sin reporte el mismo día'
+        '</span></div>',
+        unsafe_allow_html=True,
+    )
+
+    _cod_opts_f = ["Todas"] + sorted(_df_fallas["_COD"].dropna().unique().tolist())
+    _cod_sel_f  = st.selectbox("Filtrar por máquina", _cod_opts_f, key="rep_falla_cod")
+
+    _df_f_show = _df_fallas.copy()
+    if _cod_sel_f != "Todas":
+        _df_f_show = _df_f_show[_df_f_show["_COD"] == _cod_sel_f]
+
+    _vista_f = _df_f_show[[
+        "_COD","FECHA_DIA","LITROS","REPORTO","FALLA_REPORTE"
+    ]].rename(columns={
+        "_COD":"Código","FECHA_DIA":"Fecha","LITROS":"Litros",
+        "REPORTO":"¿Reportó?","FALLA_REPORTE":"⚠ Falla",
+    })
+    _vista_f["¿Reportó?"] = _vista_f["¿Reportó?"].map({1:"✅ Sí", 0:"❌ No"})
+    _vista_f["⚠ Falla"]   = _vista_f["⚠ Falla"].map({True:"⚠ FALLA", False:"OK"})
+
+    st.dataframe(
+        _vista_f,
+        use_container_width=True,
+        hide_index=True,
+        height=min(40 * len(_vista_f) + 42, 380),
+        column_config={
+            "Código": st.column_config.TextColumn("Código", width="small"),
+            "Litros": st.column_config.NumberColumn("Litros", format="%.0f L"),
+            "⚠ Falla": st.column_config.TextColumn(
+                "⚠ Falla",
+                help="FALLA = hubo recarga pero no se registró reporte ese día"
+            ),
+        },
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # SECCIÓN 6 — DRILL-DOWN por máquina
+    # ─────────────────────────────────────────────────────────────────────────
+    st.markdown(
+        '<div class="seccion">'
+        '<div class="seccion-titulo">🔍 Análisis individual — historial reciente</div>',
+        unsafe_allow_html=True,
+    )
+
+    _cod_drill_opts = sorted(_df_histo["_COD"].dropna().unique().tolist())
+    _cod_drill = st.selectbox("Seleccionar máquina", _cod_drill_opts, key="rep_drill_cod")
+
+    if _cod_drill:
+        _id_drill = next((k for k, v in _mapa_cod.items() if v == _cod_drill), None)
+        if _id_drill:
+            _histo_m = (
+                _df_histo[_df_histo["ID_MAQUINA"] == _id_drill]
+                .sort_values("FECHA_DIA", ascending=False)
+                .head(30).copy()
+            )
+            if not _histo_m.empty:
+                # KPIs
+                _d1, _d2, _d3, _d4 = st.columns(4)
+                _d1.metric("Días con reporte (30d)", int(_histo_m["REPORTO"].sum()))
+                _d2.metric("Días con recarga (30d)", int((_histo_m["LITROS"] > 0).sum()))
+                _d3.metric("Horas totales (30d)",    f"{_histo_m['HRS'].sum():,.0f}")
+                _d4.metric("Litros totales (30d)",   f"{_histo_m['LITROS'].sum():,.0f}")
+
+                # Racha actual
+                _histo_ord = _histo_m.sort_values("FECHA_DIA")
+                _dias_consec = 0
+                for _, _frow in _histo_ord.iloc[::-1].iterrows():
+                    if _frow["REPORTO"] == 0:
+                        _dias_consec += 1
+                    else:
+                        break
+
+                # Info del patrón para esta máquina
+                _pat_row = _df_patron[_df_patron["_COD"] == _cod_drill]
+                if not _pat_row.empty:
+                    _ev_m = int(_pat_row["EVENTOS"].iloc[0])
+                    _sev_m = _pat_row["SEVERIDAD"].iloc[0]
+                    _rm    = int(_pat_row["RACHA_MAX"].iloc[0])
+                    _lit_m = float(_pat_row["LITROS_SF"].iloc[0])
+                    st.markdown(
+                        f'<div style="background:#FEF9C3;border-left:4px solid #F59E0B;'
+                        f'border-radius:0 8px 8px 0;padding:10px 16px;margin-bottom:10px;'
+                        f'font-size:13px;color:#78350F">'
+                        f'Patrón detectado — <b>{_ev_m} eventos</b> sin reporte · '
+                        f'Racha máx: <b>{_rm}d</b> · '
+                        f'Litros sin respaldo: <b>{_lit_m:,.0f} L</b> · '
+                        f'Severidad: <b>{_sev_m}</b>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                if _dias_consec >= 3:
+                    st.error(
+                        f"🚨 **{_cod_drill}** lleva **{_dias_consec} días consecutivos** "
+                        f"sin reporte — requiere atención inmediata."
+                    )
+                elif _dias_consec >= 2:
+                    st.warning(
+                        f"⚠ **{_cod_drill}** lleva **{_dias_consec} días consecutivos** "
+                        f"sin reporte."
+                    )
+
+                # Tabla últimos 10 días
+                st.markdown("**Últimos 10 días:**")
+                _ult10 = _histo_m.head(10).copy()
+                _vista_drill = _ult10[[
+                    "FECHA_DIA","REPORTO","HRS","LITROS"
+                ]].rename(columns={
+                    "FECHA_DIA":"Fecha","REPORTO":"Reportó","HRS":"Horas","LITROS":"Litros"
+                })
+                _vista_drill["Reportó"] = _vista_drill["Reportó"].map({1:"✅ Sí", 0:"❌ No"})
+                _vista_drill["Horas"]   = _vista_drill["Horas"].apply(
+                    lambda x: f"{x:,.1f}" if x > 0 else "—"
+                )
+                _vista_drill["Litros"]  = _vista_drill["Litros"].apply(
+                    lambda x: f"{x:,.0f} L" if x > 0 else "—"
+                )
+                st.dataframe(_vista_drill, use_container_width=True,
+                             hide_index=True, height=min(40*len(_vista_drill)+42, 460))
+
+                # Gráfico
+                _histo_plot = _histo_m.sort_values("FECHA_DIA").copy()
+                _histo_plot["FECHA"] = pd.to_datetime(_histo_plot["FECHA_DIA"])
+                _fig_d = go.Figure()
+                _fig_d.add_trace(go.Bar(
+                    x=_histo_plot["FECHA"], y=_histo_plot["LITROS"],
+                    name="Litros recarga", marker_color="#F59E0B",
+                    opacity=0.65, yaxis="y2",
+                ))
+                _fig_d.add_trace(go.Scatter(
+                    x=_histo_plot["FECHA"],
+                    y=_histo_plot["REPORTO"].astype(float),
+                    mode="lines+markers", name="Reportó (1=Sí, 0=No)",
+                    line=dict(color="#10B981", width=2),
+                    marker=dict(
+                        size=10,
+                        color=_histo_plot["REPORTO"].apply(
+                            lambda v: "#10B981" if v == 1 else "#EF4444"
+                        ),
+                        line=dict(width=1, color="#fff"),
+                    ),
+                ))
+                _fig_d.update_layout(
+                    height=260, margin=dict(l=0,r=8,t=24,b=0),
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                    xaxis=dict(showgrid=False, tickfont=dict(size=10)),
+                    yaxis=dict(title="Reportó", range=[-0.2, 1.5],
+                               tickvals=[0,1], ticktext=["No","Sí"],
+                               gridcolor="#F1F5F9", tickfont=dict(size=10)),
+                    yaxis2=dict(title="Litros", overlaying="y", side="right",
+                                tickfont=dict(size=10), showgrid=False),
+                )
+                st.plotly_chart(_fig_d, use_container_width=True,
+                                config={"displayModeBar": False})
+            else:
+                st.info(f"No hay historial disponible para {_cod_drill}.")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # SECCIÓN 7 — EXPORTAR
+    # ─────────────────────────────────────────────────────────────────────────
+    _rexp1, _rexp2, _rexp3 = st.columns(3)
+    with _rexp1:
+        st.download_button(
+            "⬇ Control reportes (CSV)",
+            _df_show[[
+                "_COD","EQUIPO_FAMILIA","TIPO_MAQUINA","ESTADO","ULT_REPORTE","DIAS_SR","NIVEL"
+            ]].rename(columns={
+                "_COD":"Código","EQUIPO_FAMILIA":"Familia","TIPO_MAQUINA":"Tipo",
+                "ESTADO":"Estado","ULT_REPORTE":"Último reporte",
+                "DIAS_SR":"Días sin reporte","NIVEL":"Nivel",
+            }).to_csv(index=False).encode("utf-8-sig"),
+            "control_reportes.csv","text/csv", use_container_width=True,
+        )
+    with _rexp2:
+        st.download_button(
+            "⬇ Actividad sin reporte (CSV)",
+            _df_f_show[[
+                "_COD","FECHA_DIA","LITROS","REPORTO","FALLA_REPORTE"
+            ]].rename(columns={
+                "_COD":"Código","FECHA_DIA":"Fecha","LITROS":"Litros",
+                "REPORTO":"Reportó","FALLA_REPORTE":"Falla reporte",
+            }).to_csv(index=False).encode("utf-8-sig"),
+            "actividad_sin_reporte.csv","text/csv", use_container_width=True,
+        )
+    with _rexp3:
+        if not _df_patron.empty:
+            st.download_button(
+                "⬇ Máquinas sin control (CSV)",
+                _df_patron[[
+                    "_COD","EQUIPO_FAMILIA","EVENTOS","LITROS_SF","RACHA_MAX","SEVERIDAD"
+                ]].rename(columns={
+                    "_COD":"Código","EQUIPO_FAMILIA":"Familia",
+                    "EVENTOS":"Eventos s/rep.","LITROS_SF":"Litros sin rep.",
+                    "RACHA_MAX":"Racha máxima","SEVERIDAD":"Severidad",
+                }).to_csv(index=False).encode("utf-8-sig"),
+                "maquinas_sin_control.csv","text/csv", use_container_width=True,
+            )
+
+
+
+# ════════════════════════════════════════════════════════════
+# TAB 6 — ALERTAS
 # ════════════════════════════════════════════════════════════
 with tab_alertas:
     if alertas.empty:
