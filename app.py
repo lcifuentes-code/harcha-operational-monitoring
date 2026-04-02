@@ -408,8 +408,10 @@ def _calc_reportes(archivo_bytes: bytes, fecha_ini_str: str, fecha_fin_str: str)
     _ids_base = set(_cat["ID_MAQUINA"])
 
     # ── BLOQUE 1: DIAS_SIN_REPORTE (historial completo, sin filtro de período) ─
-    # El último reporte viene de Query_Contratos_Reportes — todo el historial.
-    # El período NO afecta este cálculo.
+    # Referencia: fecha_max = última fecha de reporte en el archivo.
+    # Usar la fecha del archivo (no pd.Timestamp.today()) asegura consistencia
+    # sin importar cuándo se ejecute la app.
+    # DIAS_SR = fecha_max − ULT_REPORTE (días desde el último reporte)
     fecha_max = _df_r["FECHA_DIA"].max().date()
 
     _ult = (
@@ -418,9 +420,16 @@ def _calc_reportes(archivo_bytes: bytes, fecha_ini_str: str, fecha_fin_str: str)
         .rename(columns={"FECHA_DIA": "ULT_REPORTE"})
     )
     _ctrl = _cat.merge(_ult, on="ID_MAQUINA", how="left")
+
+    # DIAS_SR: días desde el último reporte hasta fecha_max del archivo
+    # Sin historial → 999 (marcador visual de "nunca reportó")
     _ctrl["DIAS_SR"] = _ctrl["ULT_REPORTE"].apply(
         lambda d: (fecha_max - d).days if pd.notna(d) else 999
     )
+
+    # Guardar estado original antes de filtrar (para el selector de filtros)
+    _ctrl["_NUNCA_REPORTO"] = _ctrl["ULT_REPORTE"].isna()
+
     _ctrl = (
         _ctrl[_ctrl["DIAS_SR"] >= 1]
         .sort_values("DIAS_SR", ascending=False)
@@ -2783,10 +2792,36 @@ with tab_rep:
     with _fc3:
         _q_r = st.text_input("🔎 Buscar código",
                              placeholder="CT-14, EX-07…", key="r_q")
+
+    # Segunda fila de filtros: checkboxes de exclusión (activos por defecto)
+    _fc4, _fc5, _fc6 = st.columns([2, 2, 3])
+    with _fc4:
+        _excl_disc = st.checkbox(
+            "🚫 Ocultar Discontinuadas",
+            value=True,
+            key="r_excl_disc",
+            help="Oculta máquinas con estado 'Discontinuado' — activo por defecto",
+        )
+    with _fc5:
+        _excl_sin_hist = st.checkbox(
+            "🚫 Ocultar sin historial",
+            value=True,
+            key="r_excl_sin_hist",
+            help="Oculta máquinas que nunca han registrado un reporte — activo por defecto",
+        )
+    with _fc6:
+        st.caption(
+            f"📅 Referencia: **{_fecha_max}** (último reporte en el archivo) · "
+            f"Días = fecha referencia − último reporte"
+        )
     st.markdown("</div>", unsafe_allow_html=True)
 
     # Aplicar filtros
     _df_f = _df_ctrl.copy()
+    if _excl_disc:
+        _df_f = _df_f[_df_f["ESTADO"].str.lower().str.strip() != "discontinuado"]
+    if _excl_sin_hist:
+        _df_f = _df_f[~_df_f["_NUNCA_REPORTO"].astype(bool)]
     if _fam_r != "Todas":
         _df_f = _df_f[_df_f["EQUIPO_FAMILIA"] == _fam_r]
     if _niv_r != "Todos":
