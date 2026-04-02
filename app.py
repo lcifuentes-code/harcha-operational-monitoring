@@ -252,6 +252,68 @@ def _obra_de_recarga_norm(obra_id, mapa: dict) -> str:
     return _norm_obra_texto(s)
 
 
+def _build_alertas_row(row, inc_resumen: dict) -> tuple:
+    """
+    Nivel de módulo (pickle-safe — sin closures).
+    Recibe inc_resumen como parámetro explícito.
+
+    Retorna:
+        iconos_str  : "🔴 ⚠️"  — solo iconos para la columna de tabla
+        alertas_list: [(icono, msg_corto, msg_largo), ...]  — para el panel de detalle
+
+    Regla A — Sin reporte:
+        🔴  DIAS_SR >= 5  →  "No reporta hace Xd — crítico"
+        🟡  DIAS_SR 1-4   →  "Lleva Xd sin reportar"
+        🔴  DIAS_SR == 999 → "Sin historial de reportes"
+
+    Regla B — Inconsistencia carga→vacío→carga:
+        ⚠️  ID en inc_resumen → "Registró N cargas (X L) sin reporte entre F1 y F2"
+    """
+    _mid  = row["ID_MAQUINA"]
+    _dias = row["DIAS_SR"]
+    _cod  = row.get("_COD", str(_mid))
+    _alist: list = []
+
+    # A) Sin reporte
+    if _dias >= 999:
+        _alist.append((
+            "🔴",
+            "Sin historial",
+            f"{_cod} nunca ha registrado un reporte en el sistema.",
+        ))
+    elif _dias >= 5:
+        _alist.append((
+            "🔴",
+            f"Sin reporte {_dias}d",
+            f"No reporta hace {_dias} días — requiere atención inmediata.",
+        ))
+    elif _dias >= 1:
+        _alist.append((
+            "🟡",
+            f"Sin reporte {_dias}d",
+            f"Lleva {_dias} día{'s' if _dias > 1 else ''} sin reportar.",
+        ))
+
+    # B) Inconsistencia carga sin reporte
+    if _mid in inc_resumen:
+        _i   = inc_resumen[_mid]
+        _n   = int(_i["_n"])
+        _lit = float(_i["_lit"])
+        _f1  = str(_i["_f1"])
+        _f2  = str(_i["_f2"])
+        _msg = (
+            f"Registró {_n} carga{'s' if _n > 1 else ''} ({_lit:,.0f} L) "
+            f"sin reporte el {_f1}."
+            if _f1 == _f2 else
+            f"Registró cargas ({_lit:,.0f} L) sin reporte "
+            f"entre {_f1} y {_f2} — {_n} evento{'s' if _n > 1 else ''}."
+        )
+        _alist.append(("⚠️", f"Carga sin rep. x{_n}", _msg))
+
+    _iconos = " ".join(a[0] for a in _alist)
+    return (_iconos, _alist)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Función cacheada: pestaña Reportes
 # Cache key: archivo_bytes → recalcula solo al cambiar el archivo
@@ -469,78 +531,25 @@ def _calc_reportes(archivo_bytes: bytes) -> dict:
     litros_sin_respaldo = float(_solo_fallas["LITROS"].sum()) if not _solo_fallas.empty else 0.0
 
     # ── BLOQUE 5: columna de alertas por máquina ──────────────────────────────
-    # Construye, para cada ID_MAQUINA en _ctrl, la lista de alertas activas.
-    # Formato: [(símbolo, mensaje_corto, mensaje_largo), ...]
-    #
-    # Regla A — Sin reporte
-    #   🔴  DIAS_SR >= 5  → crítico
-    #   🟡  DIAS_SR 1-4   → seguimiento
-    #
-    # Regla B — Inconsistencia carga→sin reporte→carga
-    #   ⚠️  La máquina registró recargas en fechas sin reporte.
-    #   Detectado con el patrón FALLA_REPORTE en _solo_fallas.
-    #   Mensaje incluye primera y última fecha del patrón.
-    # ──────────────────────────────────────────────────────────────────────────
-
-    # Pre-calcular resumen de inconsistencias por máquina (vectorizado)
-    _inc_resumen: dict = {}   # ID_MAQUINA → (n_eventos, lit_total, fecha_ini, fecha_fin)
+    # Vectorizado: llama a _build_alertas_row() definida al nivel de módulo
+    # (pickle-safe — sin closures) pasando _inc_resumen como dato serializable.
+    _inc_resumen: dict = {}
     if not _solo_fallas.empty:
-        _sf_sorted = _solo_fallas.sort_values("FECHA_DIA")
         _inc = (
-            _sf_sorted.groupby("ID_MAQUINA")
+            _solo_fallas.sort_values("FECHA_DIA")
+            .groupby("ID_MAQUINA")
             .agg(
-                _n    = ("FALLA_REPORTE", "sum"),
-                _lit  = ("LITROS",        "sum"),
-                _f1   = ("FECHA_DIA",     "min"),
-                _f2   = ("FECHA_DIA",     "max"),
+                _n  = ("FALLA_REPORTE", "sum"),
+                _lit= ("LITROS",        "sum"),
+                _f1 = ("FECHA_DIA",     "min"),
+                _f2 = ("FECHA_DIA",     "max"),
             )
         )
         _inc_resumen = _inc.to_dict("index")
 
-    def _build_alertas(row) -> tuple:
-        """
-        Retorna (iconos_str, lista_de_tuplas).
-        lista_de_tuplas: [(icono, msg_corto, msg_largo), ...]
-        Ejecutada en .apply() — pickle-safe porque no captura variables mutables.
-        """
-        _mid  = row["ID_MAQUINA"]
-        _dias = row["DIAS_SR"]
-        _cod  = row["_COD"]
-        _alertas = []
-
-        # A) Sin reporte
-        if _dias >= 999:
-            _alertas.append(("🔴",
-                             "Sin historial",
-                             f"{_cod} nunca ha registrado un reporte en el sistema."))
-        elif _dias >= 5:
-            _alertas.append(("🔴",
-                             f"Sin reporte {_dias}d",
-                             f"No reporta hace {_dias} días — requiere atención inmediata."))
-        elif _dias >= 1:
-            _alertas.append(("🟡",
-                             f"Sin reporte {_dias}d",
-                             f"Lleva {_dias} día{'s' if _dias > 1 else ''} sin reportar."))
-
-        # B) Inconsistencia carga → sin reporte → carga
-        if _mid in _inc_resumen:
-            _i   = _inc_resumen[_mid]
-            _n   = int(_i["_n"])
-            _lit = float(_i["_lit"])
-            _f1  = str(_i["_f1"])
-            _f2  = str(_i["_f2"])
-            if _f1 == _f2:
-                _msg = (f"Registró {_n} carga{'s' if _n>1 else ''} "
-                        f"({_lit:,.0f} L) sin reporte el {_f1}.")
-            else:
-                _msg = (f"Registró cargas ({_lit:,.0f} L) sin reporte "
-                        f"entre {_f1} y {_f2} — {_n} evento{'s' if _n>1 else ''}.")
-            _alertas.append(("⚠️", f"Carga sin rep. x{_n}", _msg))
-
-        _iconos = " ".join(a[0] for a in _alertas)
-        return (_iconos, _alertas)
-
-    _alerta_res = _ctrl.apply(_build_alertas, axis=1)
+    _alerta_res = _ctrl.apply(
+        lambda row: _build_alertas_row(row, _inc_resumen), axis=1
+    )
     _ctrl["ALERTAS_ICONOS"] = _alerta_res.apply(lambda x: x[0])
     _ctrl["ALERTAS_LISTA"]  = _alerta_res.apply(lambda x: x[1])
 
@@ -2839,11 +2848,12 @@ with tab_rep:
                 "🚨",
                 width="small",
                 help=(
-                    "Alertas activas:\n"
-                    "🔴 Sin reporte crítico (≥5 días)\n"
-                    "🟡 Sin reporte seguimiento (1-4 días)\n"
-                    "⚠️ Carga de combustible sin reporte registrado\n"
-                    "Haz clic en la fila para ver el detalle completo."
+                    "Alertas activas de la máquina:\n\n"
+                    "🔴 Sin reporte crítico — ≥5 días sin reportar\n"
+                    "🟡 Seguimiento — 1 a 4 días sin reportar\n"
+                    "⚠️ Carga sin reporte — hubo recarga de combustible "
+                    "pero no se registró reporte el mismo día\n\n"
+                    "Haz clic en la fila para ver el detalle completo de cada alerta."
                 ),
             ),
         },
@@ -2888,7 +2898,7 @@ with tab_rep:
             st.success(f"✅ **{_cod_sel_r}** — Sin alertas activas en este momento.")
 
         # ── TARJETA HTML: resumen + actividad sin reporte + historial 10 días ──
-        # Todo en un único _stcr.html() — evita bug de st.markdown + indentación
+        # Todo en un único stc.html() — evita bug de st.markdown + indentación
         _fallas_m = (
             _df_fallas[(_df_fallas["_COD"] == _cod_sel_r) & _df_fallas["FALLA_REPORTE"]]
             if not _df_fallas.empty else pd.DataFrame()
@@ -3022,7 +3032,7 @@ with tab_rep:
             "</div></div></body></html>"
         )
 
-        _stcr.html(_html_r, height=_modal_h, scrolling=True)
+        stc.html(_html_r, height=_modal_h, scrolling=True)
 
     else:
         st.caption("💡 Haz clic en una fila para ver el detalle de la máquina.")
