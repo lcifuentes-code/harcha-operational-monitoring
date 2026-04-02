@@ -359,10 +359,12 @@ def _limpiar_cod_rep(texto) -> str | None:
 
 
 @st.cache_data(show_spinner=False)
-def _calc_reportes(archivo_bytes: bytes, fecha_ini_str: str, fecha_fin_str: str) -> dict:
+def _calc_reportes(archivo_bytes: bytes, fecha_ini_str: str, fecha_fin_str: str,
+                   hoy_str: str) -> dict:
     """
     Calcula todos los datos de la pestaña Reportes.
-    Cacheado por (archivo_bytes, fecha_ini, fecha_fin).
+    Cacheado por (archivo_bytes, fecha_ini, fecha_fin, hoy).
+    hoy_str se incluye en la cache key para que DIAS_SR se recalcule cada día.
 
     LÓGICA DE ALARMA (Regla B):
         Condición: 2 o más cargas consecutivas SIN reporte entre ellas,
@@ -408,11 +410,12 @@ def _calc_reportes(archivo_bytes: bytes, fecha_ini_str: str, fecha_fin_str: str)
     _ids_base = set(_cat["ID_MAQUINA"])
 
     # ── BLOQUE 1: DIAS_SIN_REPORTE (historial completo, sin filtro de período) ─
-    # Referencia: fecha_max = última fecha de reporte en el archivo.
-    # Usar la fecha del archivo (no pd.Timestamp.today()) asegura consistencia
-    # sin importar cuándo se ejecute la app.
-    # DIAS_SR = fecha_max − ULT_REPORTE (días desde el último reporte)
-    fecha_max = _df_r["FECHA_DIA"].max().date()
+    # Referencia: HOY (fecha del sistema, no del archivo).
+    # Esto evita que datos con fechas futuras en el Excel distorsionen el cálculo.
+    # Se pasa como parámetro (hoy_str) para que el cache se invalide cada día.
+    # DIAS_SR = hoy − ULT_REPORTE
+    fecha_max = _df_r["FECHA_DIA"].max().date()        # para mostrar en UI
+    _hoy = pd.Timestamp(hoy_str).date()               # referencia real para DIAS_SR
 
     _ult = (
         _df_r.groupby("ID_MAQUINA")["FECHA_DIA"]
@@ -421,10 +424,10 @@ def _calc_reportes(archivo_bytes: bytes, fecha_ini_str: str, fecha_fin_str: str)
     )
     _ctrl = _cat.merge(_ult, on="ID_MAQUINA", how="left")
 
-    # DIAS_SR: días desde el último reporte hasta fecha_max del archivo
+    # DIAS_SR: días desde el último reporte hasta HOY
     # Sin historial → 999 (marcador visual de "nunca reportó")
     _ctrl["DIAS_SR"] = _ctrl["ULT_REPORTE"].apply(
-        lambda d: (fecha_max - d).days if pd.notna(d) else 999
+        lambda d: (_hoy - d).days if pd.notna(d) else 999
     )
 
     # Guardar estado original antes de filtrar (para el selector de filtros)
@@ -2731,11 +2734,12 @@ with tab_comb:
 with tab_rep:
 
     # ── Datos cacheados ───────────────────────────────────────────────────────
-    # Cache key incluye período → alarmas ⚠️ respetan fecha_ini/fecha_fin
+    # hoy_str en cache key → DIAS_SR se recalcula cada día correctamente
     _rp           = _calc_reportes(
         st.session_state["archivo_bytes"],
         str(fecha_ini),
         str(fecha_fin),
+        str(pd.Timestamp.today().date()),
     )
     _df_ctrl      = _rp["df_ctrl"].copy()
     _df_alarmas   = _rp["df_alarmas"].copy()   # pares de cargas sin reporte
@@ -2793,26 +2797,27 @@ with tab_rep:
         _q_r = st.text_input("🔎 Buscar código",
                              placeholder="CT-14, EX-07…", key="r_q")
 
-    # Segunda fila de filtros: checkboxes de exclusión (activos por defecto)
+    # Segunda fila de filtros: checkboxes de exclusión (desactivados por defecto)
     _fc4, _fc5, _fc6 = st.columns([2, 2, 3])
     with _fc4:
         _excl_disc = st.checkbox(
             "🚫 Ocultar Discontinuadas",
-            value=True,
+            value=False,
             key="r_excl_disc",
-            help="Oculta máquinas con estado 'Discontinuado' — activo por defecto",
+            help="Oculta máquinas con estado 'Discontinuado'",
         )
     with _fc5:
         _excl_sin_hist = st.checkbox(
             "🚫 Ocultar sin historial",
-            value=True,
+            value=False,
             key="r_excl_sin_hist",
-            help="Oculta máquinas que nunca han registrado un reporte — activo por defecto",
+            help="Oculta máquinas que nunca han registrado un reporte",
         )
     with _fc6:
         st.caption(
-            f"📅 Referencia: **{_fecha_max}** (último reporte en el archivo) · "
-            f"Días = fecha referencia − último reporte"
+            f"📅 Referencia: **hoy ({pd.Timestamp.today().date()})** · "
+            f"Último dato en archivo: {_fecha_max} · "
+            f"Días = hoy − último reporte"
         )
     st.markdown("</div>", unsafe_allow_html=True)
 
