@@ -252,29 +252,28 @@ def _obra_de_recarga_norm(obra_id, mapa: dict) -> str:
     return _norm_obra_texto(s)
 
 
-def _build_alertas_row(row, inc_resumen: dict) -> tuple:
+def _build_alertas_row(row, alarmas_carga: dict) -> tuple:
     """
     Nivel de módulo (pickle-safe — sin closures).
-    Recibe inc_resumen como parámetro explícito.
 
     Retorna:
-        iconos_str  : "🔴 ⚠️"  — solo iconos para la columna de tabla
-        alertas_list: [(icono, msg_corto, msg_largo), ...]  — para el panel de detalle
+        iconos_str  : "🔴 ⚠️"  — iconos compactos para la columna de tabla
+        alertas_list: [(icono, msg_corto, msg_largo), ...]
 
-    Regla A — Sin reporte:
-        🔴  DIAS_SR >= 5  →  "No reporta hace Xd — crítico"
-        🟡  DIAS_SR 1-4   →  "Lleva Xd sin reportar"
-        🔴  DIAS_SR == 999 → "Sin historial de reportes"
+    Regla A — Sin reporte (basado en DIAS_SR):
+        🔴  >= 5 días o sin historial → crítico
+        🟡  1-4 días                  → seguimiento
 
-    Regla B — Inconsistencia carga→vacío→carga:
-        ⚠️  ID en inc_resumen → "Registró N cargas (X L) sin reporte entre F1 y F2"
+    Regla B — Cargas consecutivas sin reporte entre ellas (en el período):
+        ⚠️  si existe al menos 1 par (Carga F1 → sin reporte → Carga F2)
+            Solo aplica si hay 2+ cargas en el período.
     """
     _mid  = row["ID_MAQUINA"]
     _dias = row["DIAS_SR"]
     _cod  = row.get("_COD", str(_mid))
     _alist: list = []
 
-    # A) Sin reporte
+    # ── Regla A: días sin reporte ─────────────────────────────────────────────
     if _dias >= 999:
         _alist.append((
             "🔴",
@@ -294,21 +293,19 @@ def _build_alertas_row(row, inc_resumen: dict) -> tuple:
             f"Lleva {_dias} día{'s' if _dias > 1 else ''} sin reportar.",
         ))
 
-    # B) Inconsistencia carga sin reporte
-    if _mid in inc_resumen:
-        _i   = inc_resumen[_mid]
-        _n   = int(_i["_n"])
-        _lit = float(_i["_lit"])
-        _f1  = str(_i["_f1"])
-        _f2  = str(_i["_f2"])
+    # ── Regla B: 2+ cargas consecutivas sin reporte entre ellas ──────────────
+    # alarmas_carga[mid] = lista de pares (f1, f2, litros_f1, litros_f2)
+    if _mid in alarmas_carga:
+        _pares = alarmas_carga[_mid]          # [(f1, f2, lit1, lit2), ...]
+        _n     = len(_pares)
+        _f1_g  = str(_pares[0][0])            # primera fecha del primer par
+        _f2_g  = str(_pares[-1][1])           # segunda fecha del último par
         _msg = (
-            f"Registró {_n} carga{'s' if _n > 1 else ''} ({_lit:,.0f} L) "
-            f"sin reporte el {_f1}."
-            if _f1 == _f2 else
-            f"Registró cargas ({_lit:,.0f} L) sin reporte "
-            f"entre {_f1} y {_f2} — {_n} evento{'s' if _n > 1 else ''}."
+            f"Cargó combustible sin reportar: "
+            f"{_f1_g} → {_f2_g} "
+            f"({'1 par' if _n == 1 else f'{_n} pares'} sin reporte entre cargas)."
         )
-        _alist.append(("⚠️", f"Carga sin rep. x{_n}", _msg))
+        _alist.append(("⚠️", f"Cargas s/rep. x{_n}", _msg))
 
     _iconos = " ".join(a[0] for a in _alist)
     return (_iconos, _alist)
@@ -362,19 +359,31 @@ def _limpiar_cod_rep(texto) -> str | None:
 
 
 @st.cache_data(show_spinner=False)
-def _calc_reportes(archivo_bytes: bytes) -> dict:
+def _calc_reportes(archivo_bytes: bytes, fecha_ini_str: str, fecha_fin_str: str) -> dict:
     """
     Calcula todos los datos de la pestaña Reportes.
-    Cacheado por archivo_bytes — un solo cómputo por sesión.
+    Cacheado por (archivo_bytes, fecha_ini, fecha_fin).
+
+    LÓGICA DE ALARMA (Regla B):
+        Condición: 2 o más cargas consecutivas SIN reporte entre ellas,
+                   dentro del período seleccionado.
+        Patrón:    [Carga F1] → (sin reporte) → [Carga F2] → ALARMA ⚠️
+        NO alarma: [Carga F1] → [Reporte R] → [Carga F2] → sin alarma ✅
+
+        El combustible NO afecta DIAS_SIN_REPORTE.
+        Solo se miran cargas y reportes dentro del período.
 
     Retorna dict con:
-        df_ctrl    : tabla de control (máquinas sin reporte, días, familia…)
-        df_fallas  : eventos actividad-sin-reporte (FECHA, LITROS, FALLA)
-        df_hist    : historial diario por máquina (FECHA_DIA, ID_MAQUINA, REPORTO, LITROS)
-        mapa_cod   : {ID_MAQUINA → COD limpio}
-        fecha_max  : fecha más reciente de reportes (date)
+        df_ctrl       : máquinas con DIAS_SR >= 1, columna ALERTAS_ICONOS/LISTA
+        df_alarmas    : pares de cargas consecutivas sin reporte (para detalle)
+        df_histo      : historial diario (drill-down)
+        mapa_cod      : {ID_MAQUINA → código limpio}
+        fecha_max     : fecha más reciente de reportes
+        n_alarmas_carga: total de máquinas con alarma ⚠️
     """
-    _xl  = pd.ExcelFile(io.BytesIO(archivo_bytes))
+    from bisect import bisect_right   # búsqueda binaria — O(log n) por par
+
+    _xl   = pd.ExcelFile(io.BytesIO(archivo_bytes))
     _df_r = pd.read_excel(_xl, sheet_name="Query_Contratos_Reportes")
     _df_c = pd.read_excel(_xl, sheet_name="Query_Recargas_Combustible")
     _df_m = pd.read_excel(_xl, sheet_name="MAQUINAS")
@@ -388,27 +397,27 @@ def _calc_reportes(archivo_bytes: bytes) -> dict:
     _df_c["LITROS"] = pd.to_numeric(_df_c.get("LITROS", pd.Series()), errors="coerce").fillna(0)
     _df_c["FECHA_DIA"] = _df_c["_FECHA"].dt.normalize()
 
-    # ── Catálogo: solo máquinas de MAQUINAS_BASE, excluyendo camionetas ───────
+    # ── Catálogo base ─────────────────────────────────────────────────────────
     _df_m["_COD"] = _df_m["CODIGO_MAQUINA"].apply(_limpiar_cod_rep)
     _cat = _df_m[
         _df_m["_COD"].isin(_MAQUINAS_BASE_SET) &
         ~_df_m["EQUIPO_FAMILIA"].isin(_FAM_EXENTAS_REP)
     ][["ID_MAQUINA","_COD","EQUIPO_FAMILIA","TIPO_MAQUINA","ESTADO"]].copy()
     _cat = _cat.drop_duplicates(subset=["_COD"]).reset_index(drop=True)
+    mapa_cod  = _cat.set_index("ID_MAQUINA")["_COD"].to_dict()
+    _ids_base = set(_cat["ID_MAQUINA"])
 
-    # Mapa ID → código limpio
-    mapa_cod = _cat.set_index("ID_MAQUINA")["_COD"].to_dict()
+    # ── BLOQUE 1: DIAS_SIN_REPORTE (historial completo, sin filtro de período) ─
+    # El último reporte viene de Query_Contratos_Reportes — todo el historial.
+    # El período NO afecta este cálculo.
+    fecha_max = _df_r["FECHA_DIA"].max().date()
 
-    # ── BLOQUE 1: días sin reporte ─────────────────────────────────────────────
     _ult = (
         _df_r.groupby("ID_MAQUINA")["FECHA_DIA"]
         .max().dt.date.reset_index()
         .rename(columns={"FECHA_DIA": "ULT_REPORTE"})
     )
     _ctrl = _cat.merge(_ult, on="ID_MAQUINA", how="left")
-
-    # Fecha de referencia: último día con datos en el archivo
-    fecha_max = _df_r["FECHA_DIA"].max().date()
     _ctrl["DIAS_SR"] = _ctrl["ULT_REPORTE"].apply(
         lambda d: (fecha_max - d).days if pd.notna(d) else 999
     )
@@ -417,46 +426,109 @@ def _calc_reportes(archivo_bytes: bytes) -> dict:
         .sort_values("DIAS_SR", ascending=False)
         .reset_index(drop=True)
     )
-    _ctrl["#"] = range(1, len(_ctrl) + 1)
+    _ctrl["#"]     = range(1, len(_ctrl) + 1)
     _ctrl["NIVEL"] = _ctrl["DIAS_SR"].apply(
         lambda d: "CRITICO" if d >= 5 else ("SEGUIMIENTO" if d >= 1 else "OK")
     )
 
-    # ── BLOQUE 2: actividad sin reporte ───────────────────────────────────────
-    # Solo máquinas de la base
-    _ids_base = set(_cat["ID_MAQUINA"])
+    # ── BLOQUE 2: ALARMA DE CARGAS CONSECUTIVAS SIN REPORTE ───────────────────
+    # Solo dentro del período seleccionado.
+    # Lógica: para cada máquina, ordenar cargas del período.
+    #         Para cada par (F_i, F_{i+1}): si NO hay reporte entre F_i y F_{i+1}
+    #         → es un par de alarma.
+    #         La máquina tiene alarma ⚠️ si tiene ≥ 1 par así.
+    # ──────────────────────────────────────────────────────────────────────────
 
-    # Actividad diaria (recargas)
-    _act = (
-        _df_c[_df_c["ID_MAQUINA"].isin(_ids_base)]
-        .groupby(["ID_MAQUINA","FECHA_DIA"])["LITROS"]
+    _f_ini = pd.Timestamp(fecha_ini_str)
+    _f_fin = pd.Timestamp(fecha_fin_str)
+
+    # Cargas en el período (por máquina, fechas únicas ordenadas)
+    _c_prd = _df_c[
+        (_df_c["ID_MAQUINA"].isin(_ids_base)) &
+        (_df_c["_FECHA"].notna()) &
+        (_df_c["_FECHA"] >= _f_ini) &
+        (_df_c["_FECHA"] <= _f_fin + pd.Timedelta(days=1))
+    ].copy()
+    _c_prd["FECHA_DIA_D"] = _c_prd["_FECHA"].dt.date
+
+    # Litros por día y máquina en período
+    _c_dia = (
+        _c_prd.groupby(["ID_MAQUINA","FECHA_DIA_D"])["LITROS"]
         .sum().reset_index()
     )
-    _act["TUVO_ACTIVIDAD"] = _act["LITROS"] > 0
+    _c_dia = _c_dia[_c_dia["LITROS"] > 0]  # solo días con carga real
 
-    # Reportes diarios
-    _rep_dia = (
-        _df_r[_df_r["ID_MAQUINA"].isin(_ids_base)]
-        .groupby(["ID_MAQUINA","FECHA_DIA"])
-        .size().reset_index(name="N_REP")
+    # Cargas por máquina → sorted list of dates
+    _cargas_por_maq = (
+        _c_dia.sort_values("FECHA_DIA_D")
+        .groupby("ID_MAQUINA")["FECHA_DIA_D"]
+        .apply(list)
+        .to_dict()
     )
-    _rep_dia["REPORTO"] = (_rep_dia["N_REP"] > 0).astype(int)
 
-    # Merge: actividad vs reportes (LEFT JOIN desde actividad)
-    _fallas = _act.merge(
-        _rep_dia[["ID_MAQUINA","FECHA_DIA","REPORTO"]],
-        on=["ID_MAQUINA","FECHA_DIA"], how="left"
+    # Litros por máquina+fecha → para describir el par en el mensaje
+    _litros_por_fecha = (
+        _c_dia.set_index(["ID_MAQUINA","FECHA_DIA_D"])["LITROS"]
+        .to_dict()
     )
-    _fallas["REPORTO"]      = _fallas["REPORTO"].fillna(0).astype(int)
-    _fallas["FALLA_REPORTE"] = _fallas["TUVO_ACTIVIDAD"] & (_fallas["REPORTO"] == 0)
-    _fallas["_COD"] = _fallas["ID_MAQUINA"].map(mapa_cod)
-    _fallas["FECHA_DIA"] = pd.to_datetime(_fallas["FECHA_DIA"]).dt.date
-    # Solo filas con actividad real
-    _fallas = _fallas[_fallas["TUVO_ACTIVIDAD"]].sort_values(
-        ["FALLA_REPORTE","FECHA_DIA"], ascending=[False, False]
-    ).reset_index(drop=True)
 
-    # ── BLOQUE 3: historial diario completo (para drill-down) ─────────────────
+    # Reportes en el período (por máquina, fechas únicas ordenadas)
+    _r_prd = _df_r[
+        (_df_r["ID_MAQUINA"].isin(_ids_base)) &
+        (_df_r["FECHA_DIA"] >= _f_ini) &
+        (_df_r["FECHA_DIA"] <= _f_fin + pd.Timedelta(days=1))
+    ].copy()
+    _r_prd["FECHA_DIA_D"] = _r_prd["FECHA_DIA"].dt.date
+
+    _reportes_por_maq = (
+        _r_prd.sort_values("FECHA_DIA_D")
+        .groupby("ID_MAQUINA")["FECHA_DIA_D"]
+        .apply(lambda s: sorted(s.unique().tolist()))
+        .to_dict()
+    )
+
+    # Detectar pares consecutivos de cargas sin reporte entre ellas
+    # alarmas_carga: {ID_MAQUINA → [(f1, f2, lit1, lit2), ...]}
+    alarmas_carga: dict = {}
+
+    for _mid, _fechas_c in _cargas_por_maq.items():
+        if len(_fechas_c) < 2:
+            continue                    # necesita al menos 2 cargas
+        _rep_dates = _reportes_por_maq.get(_mid, [])
+        _pares = []
+        for _i in range(len(_fechas_c) - 1):
+            _f1, _f2 = _fechas_c[_i], _fechas_c[_i + 1]
+            # ¿Hay algún reporte entre F1 (exclusivo) y F2 (inclusivo)?
+            # Búsqueda binaria: O(log n)
+            _idx = bisect_right(_rep_dates, _f1)
+            _hay_rep = (_idx < len(_rep_dates) and _rep_dates[_idx] <= _f2)
+            if not _hay_rep:
+                _lit1 = float(_litros_por_fecha.get((_mid, _f1), 0))
+                _lit2 = float(_litros_por_fecha.get((_mid, _f2), 0))
+                _pares.append((_f1, _f2, _lit1, _lit2))
+        if _pares:
+            alarmas_carga[_mid] = _pares
+
+    # DataFrame de alarmas (para mostrar detalle por máquina)
+    _alarm_rows = []
+    for _mid, _pares in alarmas_carga.items():
+        _cod = mapa_cod.get(_mid, _mid)
+        for _f1, _f2, _lit1, _lit2 in _pares:
+            _alarm_rows.append({
+                "ID_MAQUINA": _mid,
+                "_COD":       _cod,
+                "CARGA_1":    _f1,
+                "CARGA_2":    _f2,
+                "LITROS_1":   _lit1,
+                "LITROS_2":   _lit2,
+            })
+    df_alarmas = (
+        pd.DataFrame(_alarm_rows)
+        if _alarm_rows
+        else pd.DataFrame(columns=["ID_MAQUINA","_COD","CARGA_1","CARGA_2","LITROS_1","LITROS_2"])
+    )
+
+    # ── BLOQUE 3: historial diario (drill-down, historial completo) ───────────
     _histo_r = (
         _df_r[_df_r["ID_MAQUINA"].isin(_ids_base)]
         .groupby(["ID_MAQUINA","FECHA_DIA"])
@@ -472,95 +544,28 @@ def _calc_reportes(archivo_bytes: bytes) -> dict:
     )
 
     _histo = _histo_r.merge(_histo_c, on=["ID_MAQUINA","FECHA_DIA"], how="outer")
-    _histo["REPORTO"] = _histo["REPORTO"].fillna(0).astype(int)
-    _histo["LITROS"]  = _histo["LITROS"].fillna(0)
-    _histo["HRS"]     = _histo["HRS"].fillna(0)
+    _histo["REPORTO"]   = _histo["REPORTO"].fillna(0).astype(int)
+    _histo["LITROS"]    = _histo["LITROS"].fillna(0)
+    _histo["HRS"]       = _histo["HRS"].fillna(0)
     _histo["FECHA_DIA"] = pd.to_datetime(_histo["FECHA_DIA"]).dt.date
-    _histo["_COD"] = _histo["ID_MAQUINA"].map(mapa_cod)
+    _histo["_COD"]      = _histo["ID_MAQUINA"].map(mapa_cod)
     _histo = _histo.sort_values(["ID_MAQUINA","FECHA_DIA"]).reset_index(drop=True)
 
-    # ── BLOQUE 4 (NUEVO): patrón por máquina ─────────────────────────────────
-    # Agrupación de FALLA_REPORTE por máquina para detectar patrones recurrentes.
-    # Vectorizado, sin loops — reutiliza _fallas ya calculado.
-    _solo_fallas = _fallas[_fallas["FALLA_REPORTE"]]
-
-    if not _solo_fallas.empty:
-        _patron = (
-            _solo_fallas.groupby("ID_MAQUINA")
-            .agg(
-                EVENTOS     = ("FALLA_REPORTE", "sum"),
-                LITROS_SF   = ("LITROS",        "sum"),
-            )
-            .reset_index()
-        )
-        _patron["_COD"] = _patron["ID_MAQUINA"].map(mapa_cod)
-        # Racha máxima sin reporte (días consecutivos sin reportar, contada
-        # desde el historial completo — usando _histo que ya existe)
-        _rachas = {}
-        for _mid, _grp in _histo.groupby("ID_MAQUINA"):
-            _seq = _grp.sort_values("FECHA_DIA")["REPORTO"].tolist()
-            _max_r = _cur_r = 0
-            for _v in _seq:
-                if _v == 0:
-                    _cur_r += 1
-                    _max_r = max(_max_r, _cur_r)
-                else:
-                    _cur_r = 0
-            _rachas[_mid] = _max_r
-        _patron["RACHA_MAX"] = _patron["ID_MAQUINA"].map(_rachas).fillna(0).astype(int)
-        _patron["SEVERIDAD"] = _patron["EVENTOS"].apply(
-            lambda e: "CRITICO" if e >= 5 else ("ALERTA" if e >= 3 else "EVENTO PUNTUAL")
-        )
-        _patron = (
-            _patron.sort_values("EVENTOS", ascending=False)
-            .reset_index(drop=True)
-        )
-        _patron["#"] = range(1, len(_patron) + 1)
-        # Merge con catálogo para añadir familia/tipo
-        _patron = _patron.merge(
-            _cat[["ID_MAQUINA","EQUIPO_FAMILIA","TIPO_MAQUINA"]],
-            on="ID_MAQUINA", how="left"
-        )
-    else:
-        _patron = pd.DataFrame(columns=[
-            "ID_MAQUINA","_COD","EVENTOS","LITROS_SF",
-            "RACHA_MAX","SEVERIDAD","#","EQUIPO_FAMILIA","TIPO_MAQUINA"
-        ])
-
-    # Total litros sin respaldo (KPI de impacto de negocio)
-    litros_sin_respaldo = float(_solo_fallas["LITROS"].sum()) if not _solo_fallas.empty else 0.0
-
-    # ── BLOQUE 5: columna de alertas por máquina ──────────────────────────────
-    # Vectorizado: llama a _build_alertas_row() definida al nivel de módulo
-    # (pickle-safe — sin closures) pasando _inc_resumen como dato serializable.
-    _inc_resumen: dict = {}
-    if not _solo_fallas.empty:
-        _inc = (
-            _solo_fallas.sort_values("FECHA_DIA")
-            .groupby("ID_MAQUINA")
-            .agg(
-                _n  = ("FALLA_REPORTE", "sum"),
-                _lit= ("LITROS",        "sum"),
-                _f1 = ("FECHA_DIA",     "min"),
-                _f2 = ("FECHA_DIA",     "max"),
-            )
-        )
-        _inc_resumen = _inc.to_dict("index")
-
+    # ── BLOQUE 4: columna de alertas en _ctrl ─────────────────────────────────
     _alerta_res = _ctrl.apply(
-        lambda row: _build_alertas_row(row, _inc_resumen), axis=1
+        lambda row: _build_alertas_row(row, alarmas_carga), axis=1
     )
     _ctrl["ALERTAS_ICONOS"] = _alerta_res.apply(lambda x: x[0])
     _ctrl["ALERTAS_LISTA"]  = _alerta_res.apply(lambda x: x[1])
 
     return {
-        "df_ctrl":             _ctrl,
-        "df_fallas":           _fallas,
-        "df_histo":            _histo,
-        "df_patron":           _patron,
-        "mapa_cod":            mapa_cod,
-        "fecha_max":           fecha_max,
-        "litros_sin_respaldo": litros_sin_respaldo,
+        "df_ctrl":         _ctrl,
+        "df_alarmas":      df_alarmas,       # pares de cargas sin reporte
+        "df_histo":        _histo,
+        "mapa_cod":        mapa_cod,
+        "fecha_max":       fecha_max,
+        "alarmas_carga":   alarmas_carga,    # dict {mid → [(f1,f2,lit1,lit2),...]}
+        "n_alarmas_carga": len(alarmas_carga),
     }
 
 
@@ -2717,17 +2722,23 @@ with tab_comb:
 with tab_rep:
 
     # ── Datos cacheados ───────────────────────────────────────────────────────
-    _rp        = _calc_reportes(st.session_state["archivo_bytes"])
-    _df_ctrl   = _rp["df_ctrl"].copy()
-    _df_fallas = _rp["df_fallas"].copy()
-    _df_histo  = _rp["df_histo"].copy()
-    _mapa_cod  = _rp["mapa_cod"]
-    _fecha_max = _rp["fecha_max"]
+    # Cache key incluye período → alarmas ⚠️ respetan fecha_ini/fecha_fin
+    _rp           = _calc_reportes(
+        st.session_state["archivo_bytes"],
+        str(fecha_ini),
+        str(fecha_fin),
+    )
+    _df_ctrl      = _rp["df_ctrl"].copy()
+    _df_alarmas   = _rp["df_alarmas"].copy()   # pares de cargas sin reporte
+    _df_histo     = _rp["df_histo"].copy()
+    _mapa_cod     = _rp["mapa_cod"]
+    _fecha_max    = _rp["fecha_max"]
+    _alarmas_carga = _rp["alarmas_carga"]      # {mid → [(f1,f2,lit1,lit2)]}
 
-    # ── KPIs compactos (1 fila, sin jerarquía) ────────────────────────────────
+    # ── KPIs compactos ────────────────────────────────────────────────────────
     _kc = (_df_ctrl["NIVEL"] == "CRITICO").sum()
     _ks = (_df_ctrl["NIVEL"] == "SEGUIMIENTO").sum()
-    _kf = int(_df_fallas["FALLA_REPORTE"].sum())
+    _kf = _rp["n_alarmas_carga"]               # máquinas con ⚠️ en el período
 
     st.markdown(f"""
     <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap">
@@ -2744,7 +2755,7 @@ with tab_rep:
         <div style="background:#6D28D9;color:#fff;border-radius:8px;
                     padding:8px 18px;text-align:center;min-width:80px">
             <div style="font-size:20px;font-weight:800">{_kf}</div>
-            <div style="font-size:10px;opacity:.85">⚠ ACTIVIDAD S/REP.</div>
+            <div style="font-size:10px;opacity:.85">⚠ CARGAS S/REPORTE</div>
         </div>
         <div style="background:#374151;color:#fff;border-radius:8px;
                     padding:8px 18px;text-align:center;min-width:110px">
@@ -2897,12 +2908,11 @@ with tab_rep:
         if not _alertas_lista:
             st.success(f"✅ **{_cod_sel_r}** — Sin alertas activas en este momento.")
 
-        # ── TARJETA HTML: resumen + actividad sin reporte + historial 10 días ──
+        # ── TARJETA HTML: resumen + pares de cargas sin reporte + historial ───
         # Todo en un único stc.html() — evita bug de st.markdown + indentación
-        _fallas_m = (
-            _df_fallas[(_df_fallas["_COD"] == _cod_sel_r) & _df_fallas["FALLA_REPORTE"]]
-            if not _df_fallas.empty else pd.DataFrame()
-        )
+        # Pares de cargas sin reporte para esta máquina en el período
+        _pares_m  = _alarmas_carga.get(_id_r, []) if _id_r else []
+        _n_falla  = len(_pares_m)
 
         # Colores header según días
         if _dias_r >= 5:
@@ -2946,18 +2956,20 @@ with tab_rep:
                 "color:#94A3B8;font-size:12px;'>Sin historial disponible</td></tr>"
             )
 
-        # Filas HTML: actividad sin reporte
+        # Filas HTML: pares de cargas consecutivas sin reporte entre ellas
         _falla_rows_html = ""
-        _n_falla = len(_fallas_m)
         if _n_falla > 0:
-            for _, _fr in _fallas_m.iterrows():
+            for _f1, _f2, _lit1, _lit2 in _pares_m:
                 _falla_rows_html += (
                     f"<tr style='background:#FEF2F2;'>"
-                    f"<td style='padding:4px 8px;font-size:12px;'>{_fr['FECHA_DIA']}</td>"
+                    f"<td style='padding:4px 8px;font-size:12px;font-weight:600;"
+                    f"color:#B91C1C;'>{_f1}</td>"
                     f"<td style='padding:4px 8px;font-size:12px;text-align:right;'>"
-                    f"{_fr['LITROS']:,.0f} L</td>"
-                    f"<td style='padding:4px 8px;font-size:12px;text-align:center;"
-                    f"color:#B91C1C;font-weight:700;'>⚠ SIN REPORTE</td>"
+                    f"{_lit1:,.0f} L</td>"
+                    f"<td style='padding:4px 8px;font-size:12px;font-weight:600;"
+                    f"color:#B91C1C;'>{_f2}</td>"
+                    f"<td style='padding:4px 8px;font-size:12px;text-align:right;'>"
+                    f"{_lit2:,.0f} L</td>"
                     f"</tr>"
                 )
 
@@ -3010,14 +3022,14 @@ with tab_rep:
             f"color:{'#B91C1C' if _dias_r >= 5 else '#92400E'};'>"
             f"{_dias_r} d</span></div>"
             + (
-                "<div style='margin-top:14px;' class='sect'>⚠ Actividad sin reporte</div>"
+                "<div style='margin-top:14px;' class='sect'>⚠ Cargas sin reporte entre ellas</div>"
                 "<table><thead><tr>"
-                "<th>Fecha</th><th style='text-align:right;'>Litros</th>"
-                "<th style='text-align:center;'>Estado</th>"
+                "<th>Carga 1</th><th style='text-align:right;'>Litros</th>"
+                "<th>Carga 2</th><th style='text-align:right;'>Litros</th>"
                 f"</tr></thead><tbody>{_falla_rows_html}</tbody></table>"
                 if _n_falla > 0
                 else "<div style='margin-top:14px;color:#94A3B8;font-size:12px;'>"
-                     "Sin actividad sin reporte registrada ✓</div>"
+                     "Sin pares de cargas consecutivas sin reporte ✓</div>"
             ) +
             "</div>"
             # Right: historial 10 días
