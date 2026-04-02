@@ -468,6 +468,82 @@ def _calc_reportes(archivo_bytes: bytes) -> dict:
     # Total litros sin respaldo (KPI de impacto de negocio)
     litros_sin_respaldo = float(_solo_fallas["LITROS"].sum()) if not _solo_fallas.empty else 0.0
 
+    # ── BLOQUE 5: columna de alertas por máquina ──────────────────────────────
+    # Construye, para cada ID_MAQUINA en _ctrl, la lista de alertas activas.
+    # Formato: [(símbolo, mensaje_corto, mensaje_largo), ...]
+    #
+    # Regla A — Sin reporte
+    #   🔴  DIAS_SR >= 5  → crítico
+    #   🟡  DIAS_SR 1-4   → seguimiento
+    #
+    # Regla B — Inconsistencia carga→sin reporte→carga
+    #   ⚠️  La máquina registró recargas en fechas sin reporte.
+    #   Detectado con el patrón FALLA_REPORTE en _solo_fallas.
+    #   Mensaje incluye primera y última fecha del patrón.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    # Pre-calcular resumen de inconsistencias por máquina (vectorizado)
+    _inc_resumen: dict = {}   # ID_MAQUINA → (n_eventos, lit_total, fecha_ini, fecha_fin)
+    if not _solo_fallas.empty:
+        _sf_sorted = _solo_fallas.sort_values("FECHA_DIA")
+        _inc = (
+            _sf_sorted.groupby("ID_MAQUINA")
+            .agg(
+                _n    = ("FALLA_REPORTE", "sum"),
+                _lit  = ("LITROS",        "sum"),
+                _f1   = ("FECHA_DIA",     "min"),
+                _f2   = ("FECHA_DIA",     "max"),
+            )
+        )
+        _inc_resumen = _inc.to_dict("index")
+
+    def _build_alertas(row) -> tuple:
+        """
+        Retorna (iconos_str, lista_de_tuplas).
+        lista_de_tuplas: [(icono, msg_corto, msg_largo), ...]
+        Ejecutada en .apply() — pickle-safe porque no captura variables mutables.
+        """
+        _mid  = row["ID_MAQUINA"]
+        _dias = row["DIAS_SR"]
+        _cod  = row["_COD"]
+        _alertas = []
+
+        # A) Sin reporte
+        if _dias >= 999:
+            _alertas.append(("🔴",
+                             "Sin historial",
+                             f"{_cod} nunca ha registrado un reporte en el sistema."))
+        elif _dias >= 5:
+            _alertas.append(("🔴",
+                             f"Sin reporte {_dias}d",
+                             f"No reporta hace {_dias} días — requiere atención inmediata."))
+        elif _dias >= 1:
+            _alertas.append(("🟡",
+                             f"Sin reporte {_dias}d",
+                             f"Lleva {_dias} día{'s' if _dias > 1 else ''} sin reportar."))
+
+        # B) Inconsistencia carga → sin reporte → carga
+        if _mid in _inc_resumen:
+            _i   = _inc_resumen[_mid]
+            _n   = int(_i["_n"])
+            _lit = float(_i["_lit"])
+            _f1  = str(_i["_f1"])
+            _f2  = str(_i["_f2"])
+            if _f1 == _f2:
+                _msg = (f"Registró {_n} carga{'s' if _n>1 else ''} "
+                        f"({_lit:,.0f} L) sin reporte el {_f1}.")
+            else:
+                _msg = (f"Registró cargas ({_lit:,.0f} L) sin reporte "
+                        f"entre {_f1} y {_f2} — {_n} evento{'s' if _n>1 else ''}.")
+            _alertas.append(("⚠️", f"Carga sin rep. x{_n}", _msg))
+
+        _iconos = " ".join(a[0] for a in _alertas)
+        return (_iconos, _alertas)
+
+    _alerta_res = _ctrl.apply(_build_alertas, axis=1)
+    _ctrl["ALERTAS_ICONOS"] = _alerta_res.apply(lambda x: x[0])
+    _ctrl["ALERTAS_LISTA"]  = _alerta_res.apply(lambda x: x[1])
+
     return {
         "df_ctrl":             _ctrl,
         "df_fallas":           _fallas,
@@ -2705,14 +2781,15 @@ with tab_rep:
     # Preparar vista (sin columnas internas)
     _vista = _df_f[[
         "#", "_COD", "EQUIPO_FAMILIA", "TIPO_MAQUINA",
-        "ESTADO", "ULT_REPORTE", "DIAS_SR",
+        "ESTADO", "ULT_REPORTE", "DIAS_SR", "ALERTAS_ICONOS",
     ]].rename(columns={
-        "_COD":          "Código",
-        "EQUIPO_FAMILIA":"Familia",
-        "TIPO_MAQUINA":  "Tipo",
-        "ESTADO":        "Estado",
-        "ULT_REPORTE":   "Último reporte",
-        "DIAS_SR":       "Días s/rep.",
+        "_COD":           "Código",
+        "EQUIPO_FAMILIA": "Familia",
+        "TIPO_MAQUINA":   "Tipo",
+        "ESTADO":         "Estado",
+        "ULT_REPORTE":    "Último reporte",
+        "DIAS_SR":        "Días s/rep.",
+        "ALERTAS_ICONOS": "🚨",
     }).copy()
 
     def _col_dias(val):
@@ -2758,6 +2835,17 @@ with tab_rep:
                 "Días s/rep.",
                 help="🟡 1-4 días · 🔴 ≥5 días · 🔴🔴 Sin historial (999)",
             ),
+            "🚨": st.column_config.TextColumn(
+                "🚨",
+                width="small",
+                help=(
+                    "Alertas activas:\n"
+                    "🔴 Sin reporte crítico (≥5 días)\n"
+                    "🟡 Sin reporte seguimiento (1-4 días)\n"
+                    "⚠️ Carga de combustible sin reporte registrado\n"
+                    "Haz clic en la fila para ver el detalle completo."
+                ),
+            ),
         },
     )
     st.markdown("</div>", unsafe_allow_html=True)
@@ -2767,44 +2855,46 @@ with tab_rep:
     _cod_sel_r = None
 
     if _sel_rows:
-        _idx_r    = _sel_rows[0]
-        _fila_r   = _vista.iloc[_idx_r]
+        _idx_r     = _sel_rows[0]
+        _fila_r    = _vista.iloc[_idx_r]
         _cod_sel_r = _fila_r["Código"]
         _dias_r    = int(_fila_r["Días s/rep."])
         _ult_r     = _fila_r["Último reporte"]
         _est_r     = _fila_r["Estado"]
         _fam_r_d   = _fila_r["Familia"]
 
-        # Obtener ID_MAQUINA para cruzar con historial
-        _id_r = next(
-            (k for k, v in _mapa_cod.items() if v == _cod_sel_r), None
+        # Recuperar lista de alertas pre-calculada (sin recalcular)
+        _fila_ctrl = _df_ctrl[_df_ctrl["_COD"] == _cod_sel_r]
+        _alertas_lista = (
+            _fila_ctrl["ALERTAS_LISTA"].iloc[0]
+            if not _fila_ctrl.empty and "ALERTAS_LISTA" in _fila_ctrl.columns
+            else []
         )
 
-        # ── 1. ALERTAS ────────────────────────────────────────────────────────
-        if _dias_r >= 5:
-            st.error(
-                f"🚨 **{_cod_sel_r}** lleva **{_dias_r} días** sin reporte — "
-                f"máquina crítica."
-            )
+        # Obtener ID_MAQUINA para cruzar con historial
+        _id_r = next((k for k, v in _mapa_cod.items() if v == _cod_sel_r), None)
 
-        # Fallas de esta máquina
+        # ── BLOQUE DE ALERTAS EXPLICATIVAS ───────────────────────────────────
+        # Cada alerta de la lista se muestra como bloque propio con su razón.
+        # 🔴 → st.error  |  🟡 → st.warning  |  ⚠️ → st.warning
+        for _icono, _msg_corto, _msg_largo in _alertas_lista:
+            _label = f"**{_cod_sel_r}** — {_msg_largo}"
+            if _icono == "🔴":
+                st.error(f"🔴 {_label}")
+            else:
+                st.warning(f"{_icono} {_label}")
+
+        if not _alertas_lista:
+            st.success(f"✅ **{_cod_sel_r}** — Sin alertas activas en este momento.")
+
+        # ── TARJETA HTML: resumen + actividad sin reporte + historial 10 días ──
+        # Todo en un único _stcr.html() — evita bug de st.markdown + indentación
         _fallas_m = (
-            _df_fallas[(_df_fallas["_COD"] == _cod_sel_r) &
-                       _df_fallas["FALLA_REPORTE"]]
+            _df_fallas[(_df_fallas["_COD"] == _cod_sel_r) & _df_fallas["FALLA_REPORTE"]]
             if not _df_fallas.empty else pd.DataFrame()
         )
-        if not _fallas_m.empty:
-            st.warning(
-                f"⚠ **{_cod_sel_r}** tiene **{len(_fallas_m)} evento(s)** "
-                f"con actividad sin reporte registrado "
-                f"({_fallas_m['LITROS'].sum():,.0f} L sin respaldo)."
-            )
 
-        # ── 2. TARJETA DE DETALLE ─────────────────────────────────────────────
-        # Construir HTML completo en Python (evita bug de st.markdown + indentación)
-        import streamlit.components.v1 as _stcr
-
-        # Colores según días
+        # Colores header según días
         if _dias_r >= 5:
             _hdr_c = "#7F1D1D"; _badge_bg = "#FEE2E2"
             _badge_cl = "#B91C1C"; _badge_txt = "CRÍTICA"
@@ -2815,17 +2905,16 @@ with tab_rep:
             _hdr_c = "#065F46"; _badge_bg = "#D1FAE5"
             _badge_cl = "#065F46"; _badge_txt = "AL DÍA"
 
-        # Historial 10 días de esta máquina
+        # Historial 10 días
         _hist_m = pd.DataFrame()
         if _id_r:
             _hist_m = (
                 _df_histo[_df_histo["ID_MAQUINA"] == _id_r]
                 .sort_values("FECHA_DIA", ascending=False)
-                .head(10)
-                .copy()
+                .head(10).copy()
             )
 
-        # Construir filas de historial para HTML
+        # Filas HTML: historial
         _hist_rows_html = ""
         if not _hist_m.empty:
             for _, _hr in _hist_m.iterrows():
@@ -2847,23 +2936,23 @@ with tab_rep:
                 "color:#94A3B8;font-size:12px;'>Sin historial disponible</td></tr>"
             )
 
-        # Construir filas de actividad sin reporte para HTML
+        # Filas HTML: actividad sin reporte
         _falla_rows_html = ""
-        if not _fallas_m.empty:
+        _n_falla = len(_fallas_m)
+        if _n_falla > 0:
             for _, _fr in _fallas_m.iterrows():
                 _falla_rows_html += (
                     f"<tr style='background:#FEF2F2;'>"
                     f"<td style='padding:4px 8px;font-size:12px;'>{_fr['FECHA_DIA']}</td>"
                     f"<td style='padding:4px 8px;font-size:12px;text-align:right;'>"
                     f"{_fr['LITROS']:,.0f} L</td>"
-                    f"<td style='padding:4px 8px;font-size:12px;text-align:center;color:#B91C1C;"
-                    f"font-weight:700;'>⚠ SIN REPORTE</td>"
+                    f"<td style='padding:4px 8px;font-size:12px;text-align:center;"
+                    f"color:#B91C1C;font-weight:700;'>⚠ SIN REPORTE</td>"
                     f"</tr>"
                 )
 
         # Altura dinámica
         _n_hist  = max(len(_hist_m), 1)
-        _n_falla = len(_fallas_m)
         _modal_h = 220 + (_n_hist * 30) + (130 if _n_falla > 0 else 0) + (_n_falla * 28)
 
         _html_r = (
@@ -2878,7 +2967,6 @@ with tab_rep:
             ".sect{font-size:10.5px;font-weight:700;text-transform:uppercase;"
             "letter-spacing:.07em;color:#94A3B8;margin-bottom:8px;}"
             "</style></head><body>"
-            # Outer card
             "<div style='background:#F8FAFC;border:1px solid #E2E8F0;border-radius:12px;"
             "overflow:hidden;box-shadow:0 3px 14px rgba(0,0,0,.07);'>"
             # Header
@@ -2888,9 +2976,9 @@ with tab_rep:
             f"<span style='padding:3px 10px;background:{_badge_bg};color:{_badge_cl};"
             f"border-radius:20px;font-size:10.5px;font-weight:700;'>{_badge_txt}</span>"
             "</div>"
-            # Body: 2 col grid
+            # Body grid
             "<div style='display:grid;grid-template-columns:1fr 1fr;'>"
-            # Left col: resumen
+            # Left: resumen + fallas
             "<div style='padding:14px 16px;border-right:1px solid #E2E8F0;'>"
             "<div class='sect'>📋 Resumen</div>"
             f"<div style='display:flex;justify-content:space-between;padding:4px 0;"
@@ -2908,37 +2996,37 @@ with tab_rep:
             f"<div style='display:flex;justify-content:space-between;padding:4px 0;"
             f"font-size:12.5px;'>"
             f"<span style='color:#64748B;'>Días sin reporte</span>"
-            f"<span style='font-weight:700;color:{"#B91C1C" if _dias_r >= 5 else "#92400E"};'>"
+            f"<span style='font-weight:700;"
+            f"color:{'#B91C1C' if _dias_r >= 5 else '#92400E'};'>"
             f"{_dias_r} d</span></div>"
-            # Fallas (solo si existen)
             + (
-                f"<div style='margin-top:14px;' class='sect'>⚠ Actividad sin reporte</div>"
-                f"<table><thead><tr>"
-                f"<th>Fecha</th><th style='text-align:right;'>Litros</th><th style='text-align:center;'>Estado</th>"
+                "<div style='margin-top:14px;' class='sect'>⚠ Actividad sin reporte</div>"
+                "<table><thead><tr>"
+                "<th>Fecha</th><th style='text-align:right;'>Litros</th>"
+                "<th style='text-align:center;'>Estado</th>"
                 f"</tr></thead><tbody>{_falla_rows_html}</tbody></table>"
                 if _n_falla > 0
                 else "<div style='margin-top:14px;color:#94A3B8;font-size:12px;'>"
                      "Sin actividad sin reporte registrada ✓</div>"
             ) +
             "</div>"
-            # Right col: historial 10 días
+            # Right: historial 10 días
             "<div style='padding:14px 16px;'>"
             "<div class='sect'>📅 Historial últimos 10 días</div>"
             "<table><thead><tr>"
             "<th>Fecha</th><th style='text-align:center;'>Reportó</th>"
-            "<th style='text-align:right;'>Horas</th><th style='text-align:right;'>Litros</th>"
-            "</tr></thead><tbody>"
-            f"{_hist_rows_html}"
-            "</tbody></table>"
+            "<th style='text-align:right;'>Horas</th>"
+            "<th style='text-align:right;'>Litros</th>"
+            f"</tr></thead><tbody>{_hist_rows_html}</tbody></table>"
             "</div>"
-            "</div></div>"  # close grid + card
-            "</body></html>"
+            "</div></div></body></html>"
         )
 
         _stcr.html(_html_r, height=_modal_h, scrolling=True)
 
     else:
         st.caption("💡 Haz clic en una fila para ver el detalle de la máquina.")
+
 
     # ── Exportar ──────────────────────────────────────────────────────────────
     st.download_button(
